@@ -1,0 +1,10 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: dls-d2bpm-tools
+  title: dls-d2bpm-tools
+  description: Tools to facilitate development and maintenance of D2 BPM software
+spec:
+  type: application
+  lifecycle: production
+  owner: 
