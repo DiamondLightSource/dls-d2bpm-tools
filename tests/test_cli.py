@@ -8,6 +8,8 @@ import pytest
 from dls_d2bpm_tools import __version__
 from dls_d2bpm_tools.__main__ import main
 
+from .conftest import requires_qt
+
 
 def run(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
     """Run the module entry point.
@@ -37,6 +39,7 @@ def test_no_command_prints_help() -> None:
     assert "flash-gui" in result.stdout
 
 
+@requires_qt
 def test_gui_flags_reach_the_gui(monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression: the subcommand's own flags used to be thrown away.
 
@@ -60,6 +63,7 @@ def test_gui_flags_reach_the_gui(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [[]]
 
 
+@requires_qt
 def test_gui_help_is_the_gui_s_own() -> None:
     result = run(["flash-gui", "--help"])
     assert result.returncode == 0

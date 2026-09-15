@@ -24,6 +24,8 @@ __all__ = [
     "FIRMWARE_BASE",
     "GITLAB_PROJECT",
     "GITLAB_URL",
+    "MAX_RELEASE_PAGES",
+    "RELEASES_PER_PAGE",
     "GitLabSource",
     "LocalSource",
     "SourceError",
@@ -48,6 +50,12 @@ DEFAULT_CACHE_DIR = (
 _JOB_ARTIFACT_RE = re.compile(r"/-/jobs/(?P<job>\d+)/artifacts/file/(?P<path>.+)$")
 
 _TIMEOUT = 15.0
+
+#: The releases endpoint is paginated; 100 is the API's maximum page size.
+RELEASES_PER_PAGE = 100
+
+#: A sanity bound, so a misbehaving endpoint cannot loop forever.
+MAX_RELEASE_PAGES = 20
 
 
 class SourceError(RuntimeError):
@@ -150,8 +158,7 @@ class LocalSource:
                 # Legacy layout: images sat directly in the target directory.
                 found.append(release)
 
-        found.sort(key=lambda r: r.stat().st_mtime)
-        return [r.name for r in found]
+        return [r.name for r in sorted(found, key=lambda r: r.stat().st_mtime)]
 
     def artifact(self, release: str, device: Device, suffix: str) -> Artifact:
         path = self._find(release, device, suffix)
@@ -221,17 +228,26 @@ class GitLabSource:
     def _fetch_releases(self, refresh: bool = False) -> list[_Release]:
         if self._releases is not None and not refresh:
             return self._releases
-        url = f"{self.api}/releases?per_page=100"
-        try:
-            with self._open(url) as response:
-                payload = cast(object, json.load(response))
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            raise SourceError(f"Could not reach {self.url}: {e}") from e
-        except json.JSONDecodeError as e:
-            raise SourceError(f"Unexpected response from {url}: {e}") from e
+        # The API caps a page at RELEASES_PER_PAGE, so keep asking until a short page
+        # comes back; the project will have more tags than that in time.
+        newest_first: list[_Release] = []
+        for page in range(1, MAX_RELEASE_PAGES + 1):
+            url = f"{self.api}/releases?per_page={RELEASES_PER_PAGE}&page={page}"
+            try:
+                with self._open(url) as response:
+                    payload = cast(object, json.load(response))
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                raise SourceError(f"Could not reach {self.url}: {e}") from e
+            except json.JSONDecodeError as e:
+                raise SourceError(f"Unexpected response from {url}: {e}") from e
+
+            batch = _parse_releases(payload)
+            newest_first += batch
+            if len(batch) < RELEASES_PER_PAGE:
+                break
 
         # The API returns newest first; everything else here works oldest first.
-        self._releases = list(reversed(_parse_releases(payload)))
+        self._releases = list(reversed(newest_first))
         return self._releases
 
     def refresh(self) -> None:
@@ -308,7 +324,7 @@ class GitLabSource:
         if log:
             log(f"Downloading {target.name} from GitLab…")
         target.parent.mkdir(parents=True, exist_ok=True)
-        partial = target.with_suffix(target.suffix + ".part")
+        partial = target.with_name(target.name + ".part")
         try:
             with self._open(url) as response:
                 content_type = response.headers.get("Content-Type", "")

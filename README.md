@@ -74,9 +74,10 @@ resolved — including GitLab being unreachable — is reported in the command
 preview, with the Flash button disabled, rather than in a dialog.
 
 > Releases created before the firmware CI was fixed to keep `*.py` in its build
-> artifacts (0.9.2, hmc1119_1 and 0.9.3b) link to a `d2afe-cli.py` that isn't in
-> the archive, and will say so. Use a script override or the filesystem source
-> for those.
+> artifacts — 0.9.2 and earlier, and hmc1119_1 — link to a `d2afe-cli.py` that
+> isn't in the archive, and will say so. Use a script override or the
+> filesystem source for those. Releases from 0.9.3-beta.1 onwards carry the
+> script.
 
 ## Development
 

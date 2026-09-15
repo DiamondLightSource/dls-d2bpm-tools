@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QCloseEvent, QFont, QIcon
+from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -38,6 +38,7 @@ from .firmware import (
     FirmwareSource,
     LogFn,
     build_command,
+    format_command,
     latest_release,
 )
 from .sources import FIRMWARE_BASE, GitLabSource, LocalSource, SourceError
@@ -158,7 +159,7 @@ class FlashWorker(QThread):
             self.done.emit(-1)
             return
 
-        self.output.emit(f"$ {' '.join(cmd)}")
+        self.output.emit(f"$ {format_command(cmd)}")
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -307,13 +308,13 @@ class FlashWindow(QMainWindow):
 
         return box
 
-    def _with_browse(self, edit: QLineEdit, handler: object) -> QWidget:
+    def _with_browse(self, edit: QLineEdit, handler: Callable[[], None]) -> QWidget:
         row = QWidget()
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(edit, 1)
         button = QPushButton("Browse…")
-        button.clicked.connect(handler)  # type: ignore[arg-type]
+        button.clicked.connect(handler)
         layout.addWidget(button)
         return row
 
@@ -366,7 +367,7 @@ class FlashWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.rb_afe.toggled.connect(self.refresh_releases)
         self.cb_source.currentIndexChanged.connect(self.refresh_releases)
-        self.cb_via.stateChanged.connect(self.update_preview)
+        self.cb_via.toggled.connect(self.update_preview)
         self.cb_address.currentIndexChanged.connect(self.update_preview)
         self.le_ip.textChanged.connect(self.update_preview)
         self.le_port.textChanged.connect(self.update_preview)
@@ -395,13 +396,17 @@ class FlashWindow(QMainWindow):
 
     def refresh_releases(self) -> None:
         """Repopulate the release lists for the current source and device."""
-        self.lbl_source.setText(self.source.description)
+        description = self.source.description
         try:
             releases = self.source.list_releases(self.device)
             self.source_error = ""
         except SourceError as e:
             releases = []
             self.source_error = str(e)
+        # Show an outage where the source is named, not only in the preview.
+        self.lbl_source.setText(
+            f"⚠  {self.source_error}" if self.source_error else description
+        )
 
         newest = latest_release(releases)
         for combo in (self.cb_release, self.cb_script):
@@ -479,7 +484,7 @@ class FlashWindow(QMainWindow):
     def update_preview(self) -> None:
         """Show the command that would run, or why it cannot be built yet."""
         try:
-            self.lbl_command.setText(" ".join(self.current_command()))
+            self.lbl_command.setText(format_command(self.current_command()))
             self.btn_run.setEnabled(self.worker is None)
         except (SourceError, OSError, ValueError) as e:
             self.lbl_command.setText(f"⚠  {e}")
@@ -624,7 +629,6 @@ def main(args: Sequence[str] | None = None) -> int:
     parsed, qt_args = parser.parse_known_args(argv)
 
     app = QApplication([sys.argv[0] if sys.argv else "", *qt_args])
-    app.setWindowIcon(QIcon())
     window = FlashWindow(
         default_sources(parsed.firmware_base),
         default=GITLAB_SOURCE if parsed.source == "gitlab" else FILESYSTEM_SOURCE,

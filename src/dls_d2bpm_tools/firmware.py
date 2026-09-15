@@ -21,6 +21,7 @@ __all__ = [
     "FirmwareSource",
     "LogFn",
     "build_command",
+    "format_command",
     "latest_release",
 ]
 

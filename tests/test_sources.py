@@ -12,7 +12,13 @@ from typing import Any
 import pytest
 
 from dls_d2bpm_tools.firmware import TARGET, Device
-from dls_d2bpm_tools.sources import GitLabSource, LocalSource, SourceError
+from dls_d2bpm_tools.sources import (
+    MAX_RELEASE_PAGES,
+    RELEASES_PER_PAGE,
+    GitLabSource,
+    LocalSource,
+    SourceError,
+)
 
 from .conftest import make_release
 
@@ -143,6 +149,8 @@ class FakeGitLab(GitLabSource):
         )
         self.requests: list[str] = []
         self.releases_payload: Any = RELEASES
+        #: Optional per-page override, for testing pagination.
+        self.releases_by_page: Any = None
         self.artifact_body = b"\x00firmware\xff"
         self.artifact_type = "application/octet-stream"
         self.fail: Exception | None = None
@@ -152,8 +160,12 @@ class FakeGitLab(GitLabSource):
         if self.fail is not None:
             raise self.fail
         if "/releases" in url:
-            body = json.dumps(self.releases_payload).encode()
-            return FakeResponse(body, "application/json")
+            payload = (
+                self.releases_by_page(url)
+                if self.releases_by_page
+                else self.releases_payload
+            )
+            return FakeResponse(json.dumps(payload).encode(), "application/json")
         return FakeResponse(self.artifact_body, self.artifact_type)
 
 
@@ -304,3 +316,58 @@ def test_token_is_read_from_the_environment(
 ) -> None:
     monkeypatch.setenv("GITLAB_TOKEN", "from-env")
     assert GitLabSource(cache_dir=tmp_path).token == "from-env"
+
+
+def test_releases_are_paginated(gitlab: FakeGitLab) -> None:
+    """More than one page of releases must all be listed, not just the first."""
+    pages = {
+        1: [
+            {
+                "tag_name": f"1.0.{n}",
+                "assets": {"links": [_link("bin", f"{AFE}/build/a{n}.bin")]},
+            }
+            for n in range(RELEASES_PER_PAGE)
+        ],
+        2: [
+            {
+                "tag_name": "0.9.0",
+                "assets": {"links": [_link("bin", f"{AFE}/build/old.bin")]},
+            }
+        ],
+    }
+
+    def by_page(url: str) -> Any:
+        page = int(url.rsplit("page=", 1)[1])
+        return pages.get(page, [])
+
+    gitlab.releases_by_page = by_page
+    releases = gitlab.list_releases(Device.D2AFE)
+
+    assert len(releases) == RELEASES_PER_PAGE + 1
+    # Oldest first: the second page holds the older tags.
+    assert releases[0] == "0.9.0"
+    assert releases[-1] == "1.0.0"
+
+
+def test_pagination_stops_on_a_short_page(gitlab: FakeGitLab) -> None:
+    """A page shorter than the limit is the last one; don't keep asking."""
+    gitlab.list_releases(Device.D2AFE)
+    assert len([r for r in gitlab.requests if "/releases" in r]) == 1
+
+
+def test_pagination_is_bounded(gitlab: FakeGitLab) -> None:
+    """A source that always returns a full page must not loop forever."""
+    full_page = [
+        {
+            "tag_name": f"1.0.{n}",
+            "assets": {"links": [_link("bin", f"{AFE}/build/a{n}.bin")]},
+        }
+        for n in range(RELEASES_PER_PAGE)
+    ]
+
+    def always_full(_url: str) -> Any:
+        return full_page
+
+    gitlab.releases_by_page = always_full
+    gitlab.list_releases(Device.D2AFE)
+    assert len([r for r in gitlab.requests if "/releases" in r]) == MAX_RELEASE_PAGES

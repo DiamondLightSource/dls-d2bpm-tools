@@ -9,19 +9,27 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import qInstallMessageHandler
-from PySide6.QtWidgets import QApplication
 
-from dls_d2bpm_tools.firmware import TARGET, Device, FirmwareSource
-from dls_d2bpm_tools.flash_gui import (
+from .conftest import QT_IMPORT_ERROR
+
+# Every import below reaches Qt, so skip the whole module where its system
+# libraries are missing rather than failing collection for the other tests.
+if QT_IMPORT_ERROR:  # pragma: no cover - depends on the host's Qt libraries
+    pytest.skip(f"Qt is unavailable: {QT_IMPORT_ERROR}", allow_module_level=True)
+
+from PySide6.QtCore import qInstallMessageHandler  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from dls_d2bpm_tools.firmware import TARGET, Device, FirmwareSource  # noqa: E402
+from dls_d2bpm_tools.flash_gui import (  # noqa: E402
     FILESYSTEM_SOURCE,
     GITLAB_SOURCE,
     FlashWindow,
 )
-from dls_d2bpm_tools.sources import LocalSource
+from dls_d2bpm_tools.sources import LocalSource  # noqa: E402
 
-from .conftest import make_release
-from .test_sources import FakeGitLab
+from .conftest import make_release  # noqa: E402
+from .test_sources import FakeGitLab  # noqa: E402
 
 
 def local_window(base: Path) -> FlashWindow:
