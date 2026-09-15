@@ -24,6 +24,14 @@ def test_subdir_names() -> None:
         # ...unless there is nothing numbered to prefer.
         (["hmc1119_1", "legacy"], "legacy"),
         ([], ""),
+        # Regression: the highest version wins regardless of publish order,
+        # so a backport cut after a later line cannot displace it.
+        (["1.10.0", "1.9.0"], "1.10.0"),
+        (["1.9.0", "1.10.0"], "1.10.0"),
+        (["0.9.0", "0.10.0", "0.8.7"], "0.10.0"),
+        # Tags sharing a version fall back to source order, newest last.
+        (["0.9.3", "0.9.3b"], "0.9.3b"),
+        (["0.9.3b", "0.9.3"], "0.9.3"),
     ],
 )
 def test_latest_release(releases: list[str], expected: str) -> None:

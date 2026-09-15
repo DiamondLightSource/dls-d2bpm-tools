@@ -279,3 +279,48 @@ def test_unreachable_source_is_survivable(
     win.cb_source.setCurrentText(FILESYSTEM_SOURCE)
     assert win.cb_release.currentText() == "9.9.9"
     assert win.btn_run.isEnabled()
+
+
+# ------------------------------------------------- connection validation
+
+
+@pytest.mark.parametrize(
+    ("ip", "port", "message"),
+    [
+        ("", "7003", "IP address"),
+        ("   ", "7003", "IP address"),
+        ("172.23.241.15", "", "port"),
+        ("172.23.241.15", "abc", "1 to 65535"),
+        ("172.23.241.15", "0", "1 to 65535"),
+        ("172.23.241.15", "70000", "1 to 65535"),
+    ],
+)
+def test_bad_endpoint_blocks_the_flash(
+    qapp: QApplication, base: Path, ip: str, port: str, message: str
+) -> None:
+    """Regression: an empty field used to build ':7003' and run anyway.
+
+    The failure then surfaced deep inside d2afe-cli.py, a long way from the
+    empty box that caused it.
+    """
+    win = local_window(base)
+    win.le_ip.setText(ip)
+    win.le_port.setText(port)
+
+    with pytest.raises(ValueError, match=message):
+        win.current_command()
+    assert not win.btn_run.isEnabled()
+    assert message in win.lbl_command.text()
+
+
+def test_endpoint_is_trimmed(qapp: QApplication, base: Path) -> None:
+    win = local_window(base)
+    win.le_ip.setText("  172.23.241.15 ")
+    win.le_port.setText(" 7003 ")
+    assert "--address 172.23.241.15:7003" in " ".join(win.current_command())
+
+
+def test_good_endpoint_still_runs(qapp: QApplication, base: Path) -> None:
+    win = local_window(base)
+    assert win.btn_run.isEnabled()
+    assert "172.23.241.15:7003" in win.lbl_command.text()

@@ -30,7 +30,7 @@ TARGET = "f405"
 #: Progress lines emitted by ``d2afe-cli.py`` while sending an image.
 PROGRESS_RE = re.compile(r"Sent (\d+) bytes of (\d+) bytes")
 
-_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+")
+_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
 #: Somewhere to report slow work, so it can be shown in the GUI log.
 LogFn = Callable[[str], None]
@@ -98,17 +98,34 @@ class FirmwareSource(Protocol):
         ...
 
 
+def _version_of(tag: str) -> tuple[int, int, int] | None:
+    """The leading ``major.minor.patch`` of a tag, if it has one."""
+    match = _VERSION_RE.match(tag)
+    if not match:
+        return None
+    major, minor, patch = match.groups()
+    return int(major), int(minor), int(patch)
+
+
 def latest_release(releases: Iterable[str]) -> str:
     """Pick the release to preselect from a list ordered oldest first.
 
-    Prefers the newest numbered release, so that a one-off tag like
-    ``hmc1119_1`` never becomes the default. Falls back to the newest release
-    of any name, or ``""`` if there are none.
+    Prefers the highest numbered release, so that a one-off tag like
+    ``hmc1119_1`` never becomes the default, and so that the choice does not
+    depend on the order releases happen to have been published in: a 1.9.0
+    backport cut after 1.10.0 must not displace it. Tags sharing a version
+    (``0.9.3`` and ``0.9.3b``) fall back to source order, so the later one
+    wins. With nothing numbered, the last release of any name is used, and
+    with no releases at all, ``""``.
     """
     ordered = list(releases)
-    versioned = [r for r in ordered if _VERSION_RE.match(r)]
+    versioned = [
+        (version, index, tag)
+        for index, tag in enumerate(ordered)
+        if (version := _version_of(tag)) is not None
+    ]
     if versioned:
-        return versioned[-1]
+        return max(versioned)[2]
     return ordered[-1] if ordered else ""
 
 

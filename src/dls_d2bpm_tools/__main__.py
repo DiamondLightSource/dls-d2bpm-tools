@@ -18,14 +18,23 @@ def main(args: Sequence[str] | None = None) -> int:
         version=__version__,
     )
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("flash-gui", help="Launch the D2AFE/D2PTD flashing GUI")
+    subparsers.add_parser(
+        "flash-gui",
+        help="Launch the D2AFE/D2PTD flashing GUI",
+        add_help=False,  # -h after the subcommand belongs to the GUI parser
+    )
 
-    parsed = parser.parse_args(args)
+    # Anything after the subcommand is the subcommand's to parse, so keep it
+    # rather than rejecting flags this parser has never heard of.
+    parsed, rest = parser.parse_known_args(args)
 
     if parsed.command == "flash-gui":
         from .flash_gui import main as flash_gui_main
 
-        return flash_gui_main([])
+        return flash_gui_main(rest)
+
+    if rest:
+        parser.error(f"unrecognized arguments: {' '.join(rest)}")
 
     parser.print_help()
     return 0

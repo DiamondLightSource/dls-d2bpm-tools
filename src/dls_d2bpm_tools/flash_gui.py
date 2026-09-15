@@ -153,7 +153,7 @@ class FlashWorker(QThread):
     def run(self) -> None:
         try:
             cmd = self.prepare(self.output.emit)
-        except (SourceError, OSError) as e:
+        except (SourceError, OSError, ValueError) as e:
             self.output.emit(f"Could not prepare the firmware: {e}")
             self.done.emit(-1)
             return
@@ -443,6 +443,7 @@ class FlashWindow(QMainWindow):
         is safe to call on the GUI thread to render the preview. Pass a `log`
         to also make the files exist, which may hit the network.
         """
+        ip, port = self.connection()
         script = self.script_artifact()
         binary = self.binary_artifact()
         script_path = script.obtain(log) if log else script.path
@@ -454,17 +455,33 @@ class FlashWindow(QMainWindow):
             # an interpreter rather than exec'ing the file.
             python=sys.executable,
             d2afe_address=self.cb_address.currentText(),
-            ip=self.le_ip.text(),
-            port=self.le_port.text(),
+            ip=ip,
+            port=port,
             via_ptg=self.cb_via.isChecked(),
         )
+
+    def connection(self) -> tuple[str, str]:
+        """The board's endpoint, checked here rather than by the programmer.
+
+        An empty field would otherwise build an address like ``:7003`` and
+        fail somewhere inside d2afe-cli.py, long after the mistake was made.
+        """
+        ip = self.le_ip.text().strip()
+        port = self.le_port.text().strip()
+        if not ip:
+            raise ValueError("Enter the IP address of the board")
+        if not port:
+            raise ValueError("Enter the port to connect to")
+        if not port.isdigit() or not 0 < int(port) < 65536:
+            raise ValueError(f"Port must be a number from 1 to 65535, not {port!r}")
+        return ip, port
 
     def update_preview(self) -> None:
         """Show the command that would run, or why it cannot be built yet."""
         try:
             self.lbl_command.setText(" ".join(self.current_command()))
             self.btn_run.setEnabled(self.worker is None)
-        except (SourceError, OSError, FileNotFoundError) as e:
+        except (SourceError, OSError, ValueError) as e:
             self.lbl_command.setText(f"⚠  {e}")
             self.btn_run.setEnabled(False)
 
@@ -504,7 +521,7 @@ class FlashWindow(QMainWindow):
             # Locate everything up front so mistakes surface before we start,
             # but leave any downloading to the worker thread.
             self.current_command()
-        except (SourceError, OSError, FileNotFoundError) as e:
+        except (SourceError, OSError, ValueError) as e:
             QMessageBox.critical(self, "Cannot flash", str(e))
             return
 
