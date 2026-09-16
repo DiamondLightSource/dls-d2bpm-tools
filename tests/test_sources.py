@@ -253,9 +253,15 @@ def test_nothing_is_cached_when_a_download_fails(gitlab: FakeGitLab) -> None:
 def test_missing_script_explains_the_ci_gap(gitlab: FakeGitLab) -> None:
     """Releases built before the CI fix link to a script that isn't there."""
     gitlab.list_releases(Device.D2AFE)  # prime the release list
-    gitlab.fail = urllib.error.HTTPError("url", 404, "Not Found", Message(), None)
-    with pytest.raises(SourceError, match="before the CI fix"):
-        gitlab.artifact("0.9.3b", Device.D2AFE, ".py").obtain()
+    # Closed explicitly: an HTTPError is a file-like object wrapping a
+    # tempfile, and leaving it to the garbage collector makes its finalizer
+    # fire mid-test, which `filterwarnings = "error"` turns into a failure of
+    # whichever unlucky test is running at the time.
+    with urllib.error.HTTPError("url", 404, "Not Found", Message(), None) as error:
+        gitlab.fail = error
+        with pytest.raises(SourceError, match="before the CI fix"):
+            gitlab.artifact("0.9.3b", Device.D2AFE, ".py").obtain()
+    gitlab.fail = None
 
 
 def test_unreachable_gitlab_is_reported(gitlab: FakeGitLab) -> None:
