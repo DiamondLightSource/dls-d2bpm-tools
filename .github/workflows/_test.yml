@@ -32,7 +32,7 @@ jobs:
       - name: Run tests
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgl1 libegl1 libxkbcommon0
+          sudo apt-get install -y --no-install-recommends libgl1 libegl1 libglib2.0-0t64 libxkbcommon0
           QT_QPA_PLATFORM=offscreen uv run --locked python -c 'from PySide6.QtWidgets import QApplication; app = QApplication([])'
           uv run --locked tox -e tests
 

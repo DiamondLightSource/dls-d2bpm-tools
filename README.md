@@ -35,18 +35,19 @@ is its `d2afe-flash` subcommand.
 
 `uvx` installs PySide6 and its bundled Qt libraries automatically; a separate
 Qt or Python package installation is not needed. On Linux, the host still needs
-an X11 display and Qt's system libraries (OpenGL, XCB, fontconfig and D-Bus).
+an X11 display and Qt's system libraries (OpenGL, GLib, XCB, fontconfig and D-Bus).
 These are normally present on a desktop, but minimal installations may need
 them installed once. On Debian/Ubuntu:
 
 ```sh
-sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 \
+sudo apt-get install -y libegl1 libgl1 libglib2.0-0t64 libxkbcommon-x11-0 libdbus-1-3 \
     libfontconfig1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
     libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
 ```
 
 Other distributions use different package names; see
 [Qt's Linux requirements](https://doc.qt.io/qt-6.8/linux-requirements.html).
+Older Debian/Ubuntu versions call the GLib package `libglib2.0-0`.
 These OS libraries cannot be installed by `uvx` or declared as Python dependencies.
 Both container images include them. The devcontainer also forwards `$DISPLAY`
 from the host; running the release container's GUI requires forwarding the display
