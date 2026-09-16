@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -63,6 +64,30 @@ MAX_RELEASE_PAGES = 20
 
 class SourceError(RuntimeError):
     """A source could not be reached or understood."""
+
+
+def _network_reason(error: BaseException) -> str:
+    """Describe a failed request, naming certificate trust when that is it.
+
+    A verification failure arrives wrapped in a URLError and otherwise reads
+    as if the server were unreachable, which sends people hunting for a
+    network problem that isn't there.
+    """
+    cause: BaseException = error
+    while isinstance(cause, urllib.error.URLError) and isinstance(
+        cause.reason, BaseException
+    ):
+        cause = cause.reason
+
+    if isinstance(cause, ssl.SSLCertVerificationError):
+        return (
+            f"TLS certificate verification failed ({cause}). "
+            "This Python has no CA trust store — a uv-managed interpreter looks "
+            "for one in /etc/ssl, which does not exist on RHEL 8. Set "
+            "SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt, or run the tool "
+            "with the system Python"
+        )
+    return str(error)
 
 
 @dataclass(frozen=True)
@@ -272,7 +297,9 @@ class GitLabSource:
                 with self._open(url) as response:
                     payload = cast(object, json.load(response))
             except (urllib.error.URLError, TimeoutError, OSError) as e:
-                raise SourceError(f"Could not reach {self.url}: {e}") from e
+                raise SourceError(
+                    f"Could not reach {self.url}: {_network_reason(e)}"
+                ) from e
             except json.JSONDecodeError as e:
                 raise SourceError(f"Unexpected response from {url}: {e}") from e
 
@@ -373,9 +400,13 @@ class GitLabSource:
                     "Releases built before the CI fix don't publish it — use a "
                     "script override, or the filesystem source."
                 ) from e
-            raise SourceError(f"Download failed for {target.name}: {e}") from e
+            raise SourceError(
+                f"Download failed for {target.name}: {_network_reason(e)}"
+            ) from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            raise SourceError(f"Download failed for {target.name}: {e}") from e
+            raise SourceError(
+                f"Download failed for {target.name}: {_network_reason(e)}"
+            ) from e
 
         # An expired or unauthorised artifact link answers 200 with the HTML
         # login page rather than an error, so check before trusting the bytes.

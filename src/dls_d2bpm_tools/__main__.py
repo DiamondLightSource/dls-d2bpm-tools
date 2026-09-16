@@ -4,12 +4,15 @@ from argparse import ArgumentParser
 from collections.abc import Sequence
 
 from . import __version__
+from .trust import install_system_trust
 
 __all__ = ["main"]
 
 
 def main(args: Sequence[str] | None = None) -> int:
     """Argument parser for the CLI."""
+    # Do this before anything can reach GitLab; see dls_d2bpm_tools.trust.
+    install_system_trust()
     parser = ArgumentParser(description="Tools for the Diamond-II BPM system")
     parser.add_argument(
         "-v",

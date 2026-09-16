@@ -2,6 +2,7 @@
 
 import json
 import os
+import ssl
 import time
 import urllib.error
 from collections.abc import Iterator
@@ -437,3 +438,15 @@ def test_pagination_is_bounded(gitlab: FakeGitLab) -> None:
     gitlab.releases_by_page = always_full
     gitlab.list_releases(Device.D2AFE)
     assert len([r for r in gitlab.requests if "/releases" in r]) == MAX_RELEASE_PAGES
+
+
+def test_certificate_failure_blames_trust_store(gitlab: FakeGitLab) -> None:
+    """A verification failure should not read as an unreachable server."""
+    gitlab.fail = urllib.error.URLError(
+        ssl.SSLCertVerificationError(
+            1, "[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate"
+        )
+    )
+    with pytest.raises(SourceError, match="certificate verification failed"):
+        gitlab.list_releases(Device.D2AFE)
+    gitlab.fail = None

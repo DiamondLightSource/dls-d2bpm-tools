@@ -71,6 +71,12 @@ API and downloads the assets it needs, caching them under
 network; set `GITLAB_TOKEN` if that ever changes. Use this from anywhere,
 including machines with no `/dls_sw` mount.
 
+HTTPS trusts the operating system's certificate store (via `truststore`), so
+the internal Diamond CA is honoured whichever interpreter runs the tool. This
+matters under `uvx`: a uv-managed Python looks for a CA bundle in `/etc/ssl`,
+which does not exist on RHEL 8, and without this every release lookup would
+fail as if GitLab were unreachable.
+
 To use another GitLab project or server, override the full project URL:
 
 ```sh

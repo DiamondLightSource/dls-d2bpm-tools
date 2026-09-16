@@ -16,6 +16,8 @@ description = "Tools to facilitate development and maintenance of D2 BPM softwar
 dependencies = [
     # 6.10+ ships only manylinux_2_34 wheels; DLS RHEL 8 workstations are glibc 2.28.
     "pyside6>=6.8,<6.10",
+    # uv-managed interpreters find no CA bundle on RHEL 8; see trust.py.
+    "truststore>=0.10",
 ] # Add project dependencies here, e.g. ["click", "numpy"]
 dynamic = ["version"]
 license.file = "LICENSE"

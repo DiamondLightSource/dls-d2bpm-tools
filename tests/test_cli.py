@@ -7,6 +7,7 @@ import pytest
 
 from dls_d2bpm_tools import __version__
 from dls_d2bpm_tools.__main__ import main
+from dls_d2bpm_tools.trust import install_system_trust
 
 from .conftest import requires_qt
 
@@ -88,3 +89,19 @@ def test_unknown_flag_without_a_subcommand_still_errors() -> None:
     result = run(["--bogus"])
     assert result.returncode != 0
     assert "unrecognized arguments" in result.stderr
+
+
+def test_main_installs_system_trust(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTPS must trust the OS store before any source can reach GitLab."""
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "dls_d2bpm_tools.__main__.install_system_trust",
+        lambda: calls.append(1) is None,
+    )
+    assert main([]) == 0
+    assert calls == [1]
+
+
+def test_system_trust_is_installed_for_real() -> None:
+    """truststore is a dependency, so injection must actually succeed here."""
+    assert install_system_trust()
