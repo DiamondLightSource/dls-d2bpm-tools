@@ -76,9 +76,22 @@ class FakeServer:
             time.sleep(0.005)
 
     def close(self) -> None:
+        # Unblock accept/recv before closing: close alone leaves an in-flight
+        # call holding the socket open on Linux, including the listening port.
+        try:
+            self._listener.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         self._listener.close()
+        # An accept already in flight may just have populated self.conn.
+        # The server thread exits once its peer closes in the usual case.
         if self.conn is not None:
+            try:
+                self.conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             self.conn.close()
+        self._thread.join(timeout=2)
 
 
 @pytest.fixture

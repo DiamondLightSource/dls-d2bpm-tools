@@ -3,9 +3,10 @@
 import os
 import stat
 import sys
+import threading
 import time
 import urllib.error
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -17,11 +18,11 @@ from .conftest import QT_IMPORT_ERROR
 if QT_IMPORT_ERROR:  # pragma: no cover - depends on the host's Qt libraries
     pytest.skip(f"Qt is unavailable: {QT_IMPORT_ERROR}", allow_module_level=True)
 
-from PySide6.QtCore import qInstallMessageHandler  # noqa: E402
+from PySide6.QtCore import QTimer, qInstallMessageHandler  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from dls_d2bpm_tools.console import LineEnding  # noqa: E402
-from dls_d2bpm_tools.firmware import TARGET, Device, FirmwareSource  # noqa: E402
+from dls_d2bpm_tools.firmware import TARGET, Device, FirmwareSource, LogFn  # noqa: E402
 from dls_d2bpm_tools.flash_gui import (  # noqa: E402
     FILESYSTEM_SOURCE,
     GITLAB_SOURCE,
@@ -34,10 +35,46 @@ from .test_console import FakeServer  # noqa: E402
 from .test_sources import FakeGitLab  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def close_windows(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Retain windows until their threads and queued signals have finished."""
+    windows: list[FlashWindow] = []
+    original = FlashWindow.__init__
+
+    def initialize(
+        window: FlashWindow,
+        sources: Mapping[str, FirmwareSource] | None = None,
+        default: str | None = None,
+    ) -> None:
+        original(window, sources, default)
+        windows.append(window)
+
+    monkeypatch.setattr(FlashWindow, "__init__", initialize)
+    yield
+    for window in windows:
+        window.shutdown()
+        assert _pump(
+            qapp, lambda window=window: window.console is None and window.worker is None
+        )
+        window.close()
+        window.deleteLater()
+    qapp.processEvents()
+
+
 def local_window(base: Path) -> FlashWindow:
     """A window backed only by the filesystem, for tests that don't want HTTP."""
     sources: dict[str, FirmwareSource] = {FILESYSTEM_SOURCE: LocalSource(base)}
-    return FlashWindow(sources)
+    win = FlashWindow(sources)
+    wait_for_releases(win)
+    return win
+
+
+def wait_for_releases(win: FlashWindow) -> None:
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    assert _pump(app, lambda: win.source_error != "Loading releases…")
 
 
 @pytest.fixture
@@ -67,6 +104,7 @@ def test_window_builds_command(qapp: QApplication, base: Path) -> None:
 def test_switching_device_refreshes_releases(qapp: QApplication, base: Path) -> None:
     win = local_window(base)
     win.rb_ptd.setChecked(True)
+    wait_for_releases(win)
     assert win.cb_release.currentText() == "1.1.0"
     assert win.device is Device.D2PTD
 
@@ -211,6 +249,7 @@ def test_defaults_to_gitlab(
     qapp: QApplication, both_sources: dict[str, FirmwareSource]
 ) -> None:
     win = FlashWindow(both_sources)
+    wait_for_releases(win)
     assert win.cb_source.currentText() == GITLAB_SOURCE
     assert win.cb_release.currentText() == "0.9.3b"
     assert "gitlab.example" in win.lbl_source.text()
@@ -221,8 +260,10 @@ def test_switching_source_relists_releases(
 ) -> None:
     win = FlashWindow(both_sources)
     win.cb_source.setCurrentText(FILESYSTEM_SOURCE)
+    wait_for_releases(win)
     assert win.cb_release.currentText() == "9.9.9"
     win.cb_source.setCurrentText(GITLAB_SOURCE)
+    wait_for_releases(win)
     assert win.cb_release.currentText() == "0.9.3b"
 
 
@@ -239,7 +280,8 @@ def test_preview_does_not_download(
     """Rendering the command must never block the GUI thread on the network."""
     gitlab = both_sources[GITLAB_SOURCE]
     assert isinstance(gitlab, FakeGitLab)
-    FlashWindow(both_sources)
+    win = FlashWindow(both_sources)
+    wait_for_releases(win)
 
     downloads = [r for r in gitlab.requests if "/artifacts/" in r]
     assert downloads == []
@@ -252,6 +294,7 @@ def test_flash_downloads_then_runs(
     gitlab = both_sources[GITLAB_SOURCE]
     assert isinstance(gitlab, FakeGitLab)
     win = FlashWindow(both_sources)
+    wait_for_releases(win)
 
     # Run a stub rather than the real programmer: no hardware is contacted.
     stub = tmp_path / "stub.py"
@@ -281,14 +324,128 @@ def test_unreachable_source_is_survivable(
     gitlab.fail = urllib.error.URLError("no route to host")
 
     win = FlashWindow(both_sources)
-    assert win.cb_release.count() == 0
-    assert not win.btn_run.isEnabled()
-    assert "⚠" in win.lbl_command.text()
-
-    # ...and the filesystem is still right there.
-    win.cb_source.setCurrentText(FILESYSTEM_SOURCE)
+    wait_for_releases(win)
+    assert win.cb_source.currentText() == FILESYSTEM_SOURCE
     assert win.cb_release.currentText() == "9.9.9"
     assert win.btn_run.isEnabled()
+    assert "no route to host" in win.lbl_source.text()
+    assert "Using filesystem" in win.lbl_source.text()
+
+    gitlab.fail = None
+    win.cb_source.setCurrentText(GITLAB_SOURCE)
+    wait_for_releases(win)
+    assert win.cb_release.currentText() == "0.9.3b"
+    assert "Using filesystem" not in win.lbl_source.text()
+
+
+def test_refresh_reloads_the_cached_release_list(
+    qapp: QApplication, both_sources: dict[str, FirmwareSource]
+) -> None:
+    win = FlashWindow(both_sources)
+    wait_for_releases(win)
+    gitlab = win.source
+    assert isinstance(gitlab, FakeGitLab)
+    gitlab.releases_payload = []
+    win.reload_releases()
+    wait_for_releases(win)
+    assert win.cb_release.count() == 0
+    assert not win.btn_run.isEnabled()
+    assert len(gitlab.requests) == 2
+
+
+@pytest.mark.parametrize("late_failure", [False, True])
+def test_slow_discovery_keeps_gui_responsive_and_ignores_stale_results(
+    qapp: QApplication,
+    both_sources: dict[str, FirmwareSource],
+    monkeypatch: pytest.MonkeyPatch,
+    late_failure: bool,
+) -> None:
+    entered, resume, finished = threading.Event(), threading.Event(), threading.Event()
+    original = FakeGitLab.list_releases
+
+    def slow_list(source: FakeGitLab, device: Device) -> list[str]:
+        entered.set()
+        try:
+            assert resume.wait(5)
+            if late_failure:
+                raise OSError("late outage")
+            return original(source, device)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(FakeGitLab, "list_releases", slow_list)
+    win = FlashWindow(both_sources)
+    try:
+        assert entered.wait(1)
+        assert "Loading" in win.lbl_source.text()
+        assert not win.btn_run.isEnabled()
+        ticked: list[bool] = []
+        QTimer.singleShot(0, lambda: ticked.append(True))
+        assert _pump(qapp, lambda: bool(ticked), timeout=1)
+        win.cb_source.setCurrentText(FILESYSTEM_SOURCE)
+        wait_for_releases(win)
+        assert win.cb_release.currentText() == "9.9.9"
+    finally:
+        resume.set()
+        assert finished.wait(1)
+    qapp.processEvents()
+    win._finish_releases()  # pyright: ignore[reportPrivateUsage]
+    assert win.cb_source.currentText() == FILESYSTEM_SOURCE
+    assert win.cb_release.currentText() == "9.9.9"
+    assert "late outage" not in win.lbl_source.text()
+
+
+def test_outage_with_empty_filesystem_disables_flash(
+    qapp: QApplication, both_sources: dict[str, FirmwareSource], tmp_path: Path
+) -> None:
+    gitlab = both_sources[GITLAB_SOURCE]
+    assert isinstance(gitlab, FakeGitLab)
+    gitlab.fail = urllib.error.URLError("offline")
+    both_sources[FILESYSTEM_SOURCE] = LocalSource(tmp_path / "missing")
+    win = FlashWindow(both_sources)
+    wait_for_releases(win)
+    assert win.cb_source.currentText() == FILESYSTEM_SOURCE
+    assert not win.btn_run.isEnabled()
+    assert "No releases found" in win.lbl_source.text()
+
+
+def test_flash_keeps_settings_selected_before_download(
+    qapp: QApplication,
+    both_sources: dict[str, FirmwareSource],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered, resume = threading.Event(), threading.Event()
+    original = FakeGitLab._download  # pyright: ignore[reportPrivateUsage]
+
+    def slow_download(
+        source: FakeGitLab, url: str, target: Path, log: LogFn | None
+    ) -> Path:
+        entered.set()
+        assert resume.wait(5)
+        return original(source, url, target, log)
+
+    monkeypatch.setattr(FakeGitLab, "_download", slow_download)
+    win = FlashWindow(both_sources)
+    wait_for_releases(win)
+    stub = tmp_path / "stub.py"
+    stub.write_text("import sys\nprint(repr(sys.argv))\n")
+    win.le_script.setText(str(stub))
+    expected = win.current_command()
+    win.start_flash()
+    try:
+        assert entered.wait(1)
+        win.cb_address.setCurrentText("9")
+        win.cb_via.setChecked(True)
+        win.le_ip.setText("other-host")
+        win.le_port.setText("1234")
+        win.le_script.clear()
+        win.rb_ptd.setChecked(True)
+    finally:
+        resume.set()
+        assert _pump(qapp, lambda: win.worker is None)
+    assert repr(expected[1:]) in win.log.toPlainText()
+    assert win.lbl_status.text() == "Done"
 
 
 # ------------------------------------------------- connection validation
@@ -436,7 +593,7 @@ def test_console_local_echo_can_be_turned_off(
     win.le_console.setText("quiet")
     win.send_to_console()
 
-    assert _pump(qapp, lambda: bytes(server.received) == b"quiet\r")
+    assert _pump(qapp, lambda: bytes(server.received) == b"quiet\r\n")
     assert "quiet" not in win.console_view.toPlainText()
 
 
@@ -452,9 +609,12 @@ def test_console_reports_the_far_end_hanging_up(
     qapp: QApplication, base: Path, server: FakeServer
 ) -> None:
     win = connected_window(qapp, base, server)
+    worker = win.console
+    assert worker is not None
     server.hang_up()
 
     assert _pump(qapp, lambda: win.console is None)
+    assert not worker.console.is_open
     assert "far end closed" in win.console_view.toPlainText()
     assert win.btn_console.text() == "Connect"
 
@@ -479,11 +639,12 @@ def test_flashing_takes_the_port_from_the_console(
     win = connected_window(qapp, base, server)
 
     win.start_flash()
-    assert win.console is None, "the console still held the port"
+    assert _pump(qapp, lambda: win.console is None), "the console still held the port"
     assert "so the flash can use the port" in win.console_view.toPlainText()
     assert not win.btn_console.isEnabled()
     assert win.lbl_console_status.text() == "Held by the flash"
 
+    assert _pump(qapp, lambda: "started" in win.log.toPlainText())
     win.shutdown()
     assert _pump(qapp, lambda: win.btn_console.isEnabled())
 
@@ -495,5 +656,5 @@ def test_shutdown_closes_the_console(
     win = connected_window(qapp, base, server)
     win.shutdown()
 
-    assert win.console is None
+    assert _pump(qapp, lambda: win.console is None)
     assert not any("still running" in m for m in qt_messages), qt_messages

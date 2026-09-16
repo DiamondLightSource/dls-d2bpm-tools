@@ -26,15 +26,38 @@ Releases        | <https://github.com/DiamondLightSource/dls-d2bpm-tools/release
 # from a checkout, without installing anything
 uv run dls-d2bpm-tools d2afe-flash
 
-# from PyPI, without installing anything at all
+# from PyPI, in an automatically managed Python environment
 uvx dls-d2bpm-tools d2afe-flash
 ```
 
 Once the package is installed `dls-d2bpm-tools` is on the `PATH`, and the GUI
 is its `d2afe-flash` subcommand.
 
-The GUI needs an X11 display. The devcontainer forwards `$DISPLAY` from the
-host and the image carries the Qt runtime libraries, so it works there too.
+`uvx` installs PySide6 and its bundled Qt libraries automatically; a separate
+Qt or Python package installation is not needed. On Linux, the host still needs
+an X11 display and Qt's system libraries (OpenGL, XCB, fontconfig and D-Bus).
+These are normally present on a desktop, but minimal installations may need
+them installed once. On Debian/Ubuntu:
+
+```sh
+sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 \
+    libfontconfig1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+    libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+```
+
+Other distributions use different package names; see
+[Qt's Linux requirements](https://doc.qt.io/qt-6.8/linux-requirements.html).
+These OS libraries cannot be installed by `uvx` or declared as Python dependencies.
+Both container images include them. The devcontainer also forwards `$DISPLAY`
+from the host; running the release container's GUI requires forwarding the display
+and its authentication, for example on a Linux X11 host:
+
+```sh
+docker run --rm --network host -e DISPLAY -e XAUTHORITY=/tmp/Xauthority \
+    -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
+    -v "${XAUTHORITY:-$HOME/.Xauthority}:/tmp/Xauthority:ro" \
+    ghcr.io/diamondlightsource/dls-d2bpm-tools:latest d2afe-flash
+```
 
 ## Where firmware comes from
 
@@ -56,9 +79,16 @@ Both serve the same artifacts — the same CI job writes to `/dls_sw` and
 attaches the release assets — so the choice is really about what the machine
 can reach.
 
-Downloads happen on the worker thread when you press Flash, not while you are
-editing the form, so the GUI never blocks on the network. The command preview
-shows where a file *will* be cached before it is fetched.
+Release discovery runs in the background. If GitLab cannot be reached or its
+release list cannot be read, the GUI automatically switches to the filesystem
+source and explains why. If that source has no releases, Flash stays disabled
+until files are available or both artifact paths are overridden. Select GitLab
+again to retry it.
+
+Downloads happen on the worker thread when you press Flash. The command preview
+shows where a file *will* be cached before it is fetched. Flash captures the
+selected files and connection settings immediately; editing the form during a
+download cannot change the operation already in progress.
 
 ## How it picks a release
 
@@ -71,7 +101,7 @@ boards, so a D2PTD flash borrows it from the D2AFE side of the same release.
 
 Each of the binary and the script can be overridden with an explicit path if
 you want to flash something from your own working copy. Anything that can't be
-resolved — including GitLab being unreachable — is reported in the command
+resolved after source fallback is reported in the command
 preview, with the Flash button disabled, rather than in a dialog.
 
 > Releases created before the firmware CI was fixed to keep `*.py` in its build

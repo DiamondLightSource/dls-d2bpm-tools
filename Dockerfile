@@ -41,10 +41,24 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # The runtime stage copies the built venv into a runtime container
 FROM ubuntu:resolute AS runtime
 
-# Add apt-get system dependecies for runtime here if needed
-# RUN apt-get update -y && apt-get install -y --no-install-recommends \
-#     some-library \
-#     && apt-get dist-clean
+# PySide6 includes Qt, but its Linux platform libraries come from the OS.
+# This stage does not inherit the developer image's installed packages.
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+    libegl1 \
+    libgl1 \
+    libxkbcommon-x11-0 \
+    libdbus-1-3 \
+    libfontconfig1 \
+    libxcb-cursor0 \
+    libxcb-icccm4 \
+    libxcb-image0 \
+    libxcb-keysyms1 \
+    libxcb-randr0 \
+    libxcb-render-util0 \
+    libxcb-shape0 \
+    libxcb-xinerama0 \
+    libxcb-xkb1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy the python installation from the build stage
 COPY --from=build /python /python
@@ -52,6 +66,10 @@ COPY --from=build /python /python
 # Copy the environment, but not the source code
 COPY --from=build /app/.venv /app/.venv
 ENV PATH=/app/.venv/bin:$PATH
+
+# Exercise Qt itself: --version alone deliberately does not import the GUI.
+RUN QT_QPA_PLATFORM=offscreen python -c \
+    "from PySide6.QtWidgets import QApplication; app = QApplication([])"
 
 # change this entrypoint if it is not the same as the repo
 ENTRYPOINT ["dls-d2bpm-tools"]

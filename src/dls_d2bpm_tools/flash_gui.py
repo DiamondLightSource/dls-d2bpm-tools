@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 from argparse import ArgumentParser
 from collections.abc import Callable, Mapping, Sequence
+from copy import copy
 from pathlib import Path
+from queue import Empty, Queue
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -154,6 +157,23 @@ def default_sources(base: Path = FIRMWARE_BASE) -> dict[str, FirmwareSource]:
     return {GITLAB_SOURCE: GitLabSource(), FILESYSTEM_SOURCE: LocalSource(base)}
 
 
+def _list_releases(
+    source: FirmwareSource,
+    device: Device,
+    refresh: bool,
+    results: Queue[tuple[FirmwareSource, list[str], str]],
+) -> None:
+    """Discover releases without accessing Qt or keeping a window alive."""
+    try:
+        if refresh:
+            refresh_source = getattr(source, "refresh", None)
+            if callable(refresh_source):
+                refresh_source()
+        results.put((source, source.list_releases(device), ""))
+    except (SourceError, OSError, ValueError) as e:
+        results.put((source, [], str(e)))
+
+
 class FlashWorker(QThread):
     """Runs the flash command in the background, streaming its output.
 
@@ -245,6 +265,7 @@ class ConsoleWorker(QThread):
                 break
             if text:
                 self.received.emit(text)
+        self.console.close()
         self.closed.emit("" if self._stopping else "The far end closed the connection")
 
     def stop(self) -> None:
@@ -268,6 +289,11 @@ class FlashWindow(QMainWindow):
         self.worker: FlashWorker | None = None
         self.console: ConsoleWorker | None = None
         self.source_error = ""
+        self._release_results: Queue[tuple[FirmwareSource, list[str], str]] = Queue()
+        self._source_notice = ""
+        self._release_timer = QTimer(self)
+        self._release_timer.setInterval(25)
+        self._release_timer.timeout.connect(self._finish_releases)
 
         self.setWindowTitle("D2 Programmer")
         self.setMinimumWidth(720)
@@ -530,26 +556,59 @@ class FlashWindow(QMainWindow):
 
     def reload_releases(self) -> None:
         """Re-read the source from scratch, discarding anything it cached."""
-        source = self.source
-        refresh = getattr(source, "refresh", None)
-        if callable(refresh):
-            refresh()
-        self.refresh_releases()
+        self.refresh_releases(refresh_cache=True)
 
-    def refresh_releases(self) -> None:
-        """Repopulate the release lists for the current source and device."""
-        description = self.source.description
-        try:
-            releases = self.source.list_releases(self.device)
-            self.source_error = ""
-        except SourceError as e:
-            releases = []
-            self.source_error = str(e)
-        # Show an outage where the source is named, not only in the preview.
+    def refresh_releases(
+        self, *, refresh_cache: bool = False, notice: str = ""
+    ) -> None:
+        """Discover releases in the background, including on network mounts."""
+        self._source_notice = notice
+        self.source_error = "Loading releases…"
         self.lbl_source.setText(
-            f"⚠  {self.source_error}" if self.source_error else description
+            f"{notice}{self.source.description} — Loading releases…"
         )
+        for combo in (self.cb_release, self.cb_script):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.blockSignals(False)
+        self.update_preview()
 
+        # Each request owns its queue and source snapshot. Switching source or
+        # device discards old results, including late failures, without waiting.
+        # A daemon thread can finish an HTTP request after the window closes;
+        # it never touches Qt, and must not hold application exit hostage.
+        self._release_results = Queue()
+        threading.Thread(
+            target=_list_releases,
+            args=(copy(self.source), self.device, refresh_cache, self._release_results),
+            daemon=True,
+        ).start()
+        self._release_timer.start()
+
+    def _finish_releases(self) -> None:
+        try:
+            source, releases, error = self._release_results.get_nowait()
+        except Empty:
+            return
+        self._release_timer.stop()
+        if error and isinstance(source, GitLabSource):
+            if FILESYSTEM_SOURCE in self.sources:
+                self.cb_source.blockSignals(True)
+                self.cb_source.setCurrentText(FILESYSTEM_SOURCE)
+                self.cb_source.blockSignals(False)
+                self.refresh_releases(notice=f"⚠  {error}. Using filesystem. ")
+                return
+
+        self.sources[self.cb_source.currentText()] = source
+        self.source_error = error
+        status = f"⚠  {error}" if error else source.description
+        if not error and not releases:
+            status += " — No releases found"
+        self.lbl_source.setText(f"{self._source_notice}{status}")
+        self._populate_releases(releases)
+
+    def _populate_releases(self, releases: list[str]) -> None:
+        """Apply a completed lookup on the GUI thread."""
         newest = latest_release(releases)
         for combo in (self.cb_release, self.cb_script):
             combo.blockSignals(True)
@@ -583,6 +642,27 @@ class FlashWindow(QMainWindow):
     def binary_artifact(self) -> Artifact:
         return self._artifact(self.le_binary.text(), self.cb_release, ".bin")
 
+    def prepare_flash(self) -> Callable[[LogFn | None], list[str]]:
+        """Capture every setting on the GUI thread before doing slow work."""
+        ip, port = self.connection()
+        script = self.script_artifact()
+        binary = self.binary_artifact()
+        address = self.cb_address.currentText()
+        via_ptg = self.cb_via.isChecked()
+
+        def prepare(log: LogFn | None = None) -> list[str]:
+            return build_command(
+                script.obtain(log) if log else script.path,
+                binary.obtain(log) if log else binary.path,
+                python=sys.executable,
+                d2afe_address=address,
+                ip=ip,
+                port=port,
+                via_ptg=via_ptg,
+            )
+
+        return prepare
+
     def current_command(self, log: LogFn | None = None) -> list[str]:
         """The command the current settings would run. May raise.
 
@@ -590,22 +670,7 @@ class FlashWindow(QMainWindow):
         is safe to call on the GUI thread to render the preview. Pass a `log`
         to also make the files exist, which may hit the network.
         """
-        ip, port = self.connection()
-        script = self.script_artifact()
-        binary = self.binary_artifact()
-        script_path = script.obtain(log) if log else script.path
-        binary_path = binary.obtain(log) if log else binary.path
-        return build_command(
-            script_path,
-            binary_path,
-            # Downloaded scripts have no executable bit, so always go through
-            # an interpreter rather than exec'ing the file.
-            python=sys.executable,
-            d2afe_address=self.cb_address.currentText(),
-            ip=ip,
-            port=port,
-            via_ptg=self.cb_via.isChecked(),
-        )
+        return self.prepare_flash()(log)
 
     def connection(self) -> tuple[str, str]:
         """The board's endpoint, checked here rather than by the programmer.
@@ -667,7 +732,7 @@ class FlashWindow(QMainWindow):
         try:
             # Locate everything up front so mistakes surface before we start,
             # but leave any downloading to the worker thread.
-            self.current_command()
+            prepare = self.prepare_flash()
         except (SourceError, OSError, ValueError) as e:
             QMessageBox.critical(self, "Cannot flash", str(e))
             return
@@ -686,7 +751,7 @@ class FlashWindow(QMainWindow):
         self.progress.setValue(0)
         self.btn_run.setEnabled(False)
 
-        self.worker = FlashWorker(self.current_command)
+        self.worker = FlashWorker(prepare)
         self.worker.output.connect(self.handle_output)
         self.worker.done.connect(self.handle_finished)
         # Only release our reference once the thread has actually exited.
