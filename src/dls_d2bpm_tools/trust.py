@@ -2,10 +2,12 @@
 
 uv-managed (python-build-standalone) interpreters compile OpenSSL with
 ``OPENSSLDIR=/etc/ssl``, which does not exist on RHEL 8, so ``ssl`` loads no
-CAs at all and every request to an internal host fails verification. That is
-the difference between ``uvx dls-d2bpm-tools`` and running from a venv built
-on the system Python. ``certifi`` would not help either: the Diamond CA is not
-in it. ``truststore`` defers to the OS trust store, which has both.
+CAs at all, so *every* certificate fails verification — the GitLab server's
+is a perfectly ordinary Let's Encrypt one. That is the difference between
+``uvx dls-d2bpm-tools`` and running from a venv built on the system Python.
+``certifi`` would also fix this, but ``truststore`` defers to the OS trust
+store, so it needs no bundle of its own to keep current and picks up any
+internal CA a Diamond host has been given.
 """
 
 from __future__ import annotations
