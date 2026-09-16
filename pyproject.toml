@@ -35,7 +35,6 @@ dev = [
 
 [project.scripts]
 dls-d2bpm-tools = "dls_d2bpm_tools.__main__:main"
-dls-d2afe-flash-gui = "dls_d2bpm_tools.flash_gui:main"
 
 [project.urls]
 GitHub = "https://github.com/DiamondLightSource/dls-d2bpm-tools"

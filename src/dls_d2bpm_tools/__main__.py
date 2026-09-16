@@ -19,7 +19,7 @@ def main(args: Sequence[str] | None = None) -> int:
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser(
-        "flash-gui",
+        "d2afe-flash",
         help="Launch the D2AFE/D2PTD flashing GUI",
         add_help=False,  # -h after the subcommand belongs to the GUI parser
     )
@@ -28,7 +28,7 @@ def main(args: Sequence[str] | None = None) -> int:
     # rather than rejecting flags this parser has never heard of.
     parsed, rest = parser.parse_known_args(args)
 
-    if parsed.command == "flash-gui":
+    if parsed.command == "d2afe-flash":
         from .flash_gui import main as flash_gui_main
 
         return flash_gui_main(rest)

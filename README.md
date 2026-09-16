@@ -10,7 +10,8 @@ Tools to facilitate development and maintenance of D2 BPM software.
 Right now that means the **flash GUI**: a small Qt front end over the
 `d2afe-cli.py` programming script. It lists the published firmware releases,
 lets you pick a release, board address and network endpoint, shows you exactly
-the command it is about to run, then runs it and tracks its progress.
+the command it is about to run, then runs it and tracks its progress. A second
+tab opens a **console** on the same endpoint, for talking to a board directly.
 
 What            | Where
 :---:           | :---:
@@ -23,14 +24,14 @@ Releases        | <https://github.com/DiamondLightSource/dls-d2bpm-tools/release
 
 ```
 # from a checkout, without installing anything
-uv run dls-d2afe-flash-gui
+uv run dls-d2bpm-tools d2afe-flash
 
-# or via the main CLI
-uv run dls-d2bpm-tools flash-gui
+# from PyPI, without installing anything at all
+uvx dls-d2bpm-tools d2afe-flash
 ```
 
-Once the package is installed both `dls-d2afe-flash-gui` and
-`dls-d2bpm-tools flash-gui` are on the `PATH`.
+Once the package is installed `dls-d2bpm-tools` is on the `PATH`, and the GUI
+is its `d2afe-flash` subcommand.
 
 The GUI needs an X11 display. The devcontainer forwards `$DISPLAY` from the
 host and the image carries the Qt runtime libraries, so it works there too.
@@ -78,6 +79,31 @@ preview, with the Flash button disabled, rather than in a dialog.
 > isn't in the archive, and will say so. Use a script override or the
 > filesystem source for those. Releases from 0.9.3-beta.1 onwards carry the
 > script.
+
+## The console tab
+
+The Console tab opens a session on the same IP and port used for flashing, so
+you can talk to a board between flashes without leaving the app or unplugging
+anything.
+
+It is a **raw TCP** connection, not telnet, and that distinction matters. The
+endpoint is a serial device server in TCP server mode, where the socket is a
+pipe onto the RS485 bus. A telnet client opens by sending IAC negotiation
+bytes, which every board on the bus would see as noise, and would in turn eat
+parts of their replies as if they were negotiation. If you want to reach the
+same port from a shell, use `nc <ip> <port>`, not `telnet`.
+
+Two consequences of the bus being shared, both surfaced in the tab:
+
+- **Everything is a broadcast.** What you send reaches every board on that
+  port, and their replies come back interleaved. The board address used for
+  flashing means nothing here.
+- **Only one thing can hold the port.** Pressing Flash disconnects the console
+  first and says so, and the Connect button is disabled while a flash runs.
+
+Lines are terminated with CRLF by default, since that is what the D2AFE console
+expects; CR and LF are selectable. Local echo is on by default,
+because half-duplex RS485 will not echo your keystrokes back to you.
 
 ## Development
 

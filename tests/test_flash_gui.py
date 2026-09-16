@@ -20,6 +20,7 @@ if QT_IMPORT_ERROR:  # pragma: no cover - depends on the host's Qt libraries
 from PySide6.QtCore import qInstallMessageHandler  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from dls_d2bpm_tools.console import LineEnding  # noqa: E402
 from dls_d2bpm_tools.firmware import TARGET, Device, FirmwareSource  # noqa: E402
 from dls_d2bpm_tools.flash_gui import (  # noqa: E402
     FILESYSTEM_SOURCE,
@@ -29,6 +30,7 @@ from dls_d2bpm_tools.flash_gui import (  # noqa: E402
 from dls_d2bpm_tools.sources import LocalSource  # noqa: E402
 
 from .conftest import make_release  # noqa: E402
+from .test_console import FakeServer  # noqa: E402
 from .test_sources import FakeGitLab  # noqa: E402
 
 
@@ -332,3 +334,166 @@ def test_good_endpoint_still_runs(qapp: QApplication, base: Path) -> None:
     win = local_window(base)
     assert win.btn_run.isEnabled()
     assert "172.23.241.15:7003" in win.lbl_command.text()
+
+
+# ---------------------------------------------------------------- Console
+
+
+@pytest.fixture
+def server() -> Iterator[FakeServer]:
+    """A loopback stand-in for the serial device server."""
+    fake = FakeServer()
+    yield fake
+    fake.close()
+
+
+def console_window(base: Path, server: FakeServer) -> FlashWindow:
+    """A window pointed at the fake device server."""
+    win = local_window(base)
+    win.le_ip.setText("127.0.0.1")
+    win.le_port.setText(str(server.port))
+    return win
+
+
+def connected_window(qapp: QApplication, base: Path, server: FakeServer) -> FlashWindow:
+    win = console_window(base, server)
+    win.toggle_console()
+    assert _pump(qapp, lambda: "*** Connected" in win.console_view.toPlainText())
+    return win
+
+
+def test_console_starts_disconnected(qapp: QApplication, base: Path) -> None:
+    win = local_window(base)
+    assert win.console is None
+    assert not win.le_console.isEnabled()
+    assert not win.btn_send.isEnabled()
+    assert win.btn_console.text() == "Connect"
+    assert win.lbl_console_status.text() == "Not connected"
+
+
+def test_console_connects_and_disconnects(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    win = connected_window(qapp, base, server)
+    assert win.le_console.isEnabled()
+    assert win.btn_send.isEnabled()
+    assert win.btn_console.text() == "Disconnect"
+    assert win.lbl_console_status.text() == "Connected"
+
+    win.toggle_console()
+    assert _pump(qapp, lambda: win.console is None)
+    assert not win.le_console.isEnabled()
+    assert win.btn_console.text() == "Connect"
+    assert "*** Disconnected" in win.console_view.toPlainText()
+
+
+def test_console_refuses_an_empty_endpoint(
+    qapp: QApplication, base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The endpoint is validated here, as it is for flashing."""
+    win = local_window(base)
+    win.le_ip.setText("")
+    complaints: list[str] = []
+
+    def complain(parent: object, title: str, text: str) -> None:
+        complaints.append(text)
+
+    monkeypatch.setattr("dls_d2bpm_tools.flash_gui.QMessageBox.critical", complain)
+
+    win.toggle_console()
+    assert win.console is None
+    assert complaints == ["Enter the IP address of the board"]
+
+
+def test_console_sends_a_crlf_by_default(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    win = connected_window(qapp, base, server)
+    win.le_console.setText("status")
+    win.send_to_console()
+
+    assert _pump(qapp, lambda: bytes(server.received) == b"status\r\n")
+    assert win.le_console.text() == "", "the input should be cleared once sent"
+
+
+def test_console_honours_the_line_ending(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    win = connected_window(qapp, base, server)
+    win.cb_ending.setCurrentText(LineEnding.CR.label)
+    win.le_console.setText("go")
+    win.send_to_console()
+
+    assert _pump(qapp, lambda: bytes(server.received) == b"go\r")
+
+
+def test_console_local_echo_can_be_turned_off(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    """Half duplex will not echo, so the GUI does — unless it is told not to."""
+    win = connected_window(qapp, base, server)
+    win.cb_echo.setChecked(False)
+    win.le_console.setText("quiet")
+    win.send_to_console()
+
+    assert _pump(qapp, lambda: bytes(server.received) == b"quiet\r")
+    assert "quiet" not in win.console_view.toPlainText()
+
+
+def test_console_shows_what_the_board_replies(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    win = connected_window(qapp, base, server)
+    server.send(b"D2AFE> ")
+    assert _pump(qapp, lambda: "D2AFE> " in win.console_view.toPlainText())
+
+
+def test_console_reports_the_far_end_hanging_up(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    win = connected_window(qapp, base, server)
+    server.hang_up()
+
+    assert _pump(qapp, lambda: win.console is None)
+    assert "far end closed" in win.console_view.toPlainText()
+    assert win.btn_console.text() == "Connect"
+
+
+def test_console_reports_a_refused_connection(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    win = console_window(base, server)
+    server.close()  # Nothing listening on that port any more.
+
+    win.toggle_console()
+    assert _pump(qapp, lambda: win.console is None)
+    assert "Could not connect" in win.console_view.toPlainText()
+
+
+def test_flashing_takes_the_port_from_the_console(
+    qapp: QApplication, tmp_path: Path, server: FakeServer
+) -> None:
+    """One endpoint, one holder: the flash needs the console to let go."""
+    base = tmp_path / "fw"
+    _make_runnable(base, "print('started', flush=True)\ntime.sleep(60)\n")
+    win = connected_window(qapp, base, server)
+
+    win.start_flash()
+    assert win.console is None, "the console still held the port"
+    assert "so the flash can use the port" in win.console_view.toPlainText()
+    assert not win.btn_console.isEnabled()
+    assert win.lbl_console_status.text() == "Held by the flash"
+
+    win.shutdown()
+    assert _pump(qapp, lambda: win.btn_console.isEnabled())
+
+
+def test_shutdown_closes_the_console(
+    qapp: QApplication, base: Path, server: FakeServer, qt_messages: list[str]
+) -> None:
+    """A live QThread at teardown aborts the process, so it must be stopped."""
+    win = connected_window(qapp, base, server)
+    win.shutdown()
+
+    assert win.console is None
+    assert not any("still running" in m for m in qt_messages), qt_messages

@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QCloseEvent, QFont
+from PySide6.QtGui import QCloseEvent, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -27,10 +27,12 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from .console import ConsoleError, LineEnding, RawConsole
 from .firmware import (
     PROGRESS_RE,
     Artifact,
@@ -43,7 +45,7 @@ from .firmware import (
 )
 from .sources import FIRMWARE_BASE, GitLabSource, LocalSource, SourceError
 
-__all__ = ["FlashWindow", "main"]
+__all__ = ["ConsoleWorker", "FlashWindow", "main"]
 
 DEFAULT_IP = "172.23.241.15"
 DEFAULT_PORT = "7003"
@@ -118,6 +120,27 @@ QLabel#command {
     color: #9fd0a6;
 }
 QLabel#hint { color: #8f9bb3; }
+QLabel#warn { color: #e0b070; }
+QTabWidget::pane {
+    border: 1px solid #333843;
+    border-radius: 8px;
+    top: -1px;
+}
+QTabBar::tab {
+    background: #272b34;
+    border: 1px solid #333843;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 7px 18px;
+    margin-right: 2px;
+    color: #8f9bb3;
+}
+QTabBar::tab:selected {
+    background: #1e2128;
+    color: #dfe3ea;
+    font-weight: 600;
+}
 QRadioButton, QCheckBox { padding: 2px; }
 """
 
@@ -191,6 +214,45 @@ class FlashWorker(QThread):
             proc.terminate()
 
 
+class ConsoleWorker(QThread):
+    """Opens a `RawConsole` and pumps it, so the GUI never blocks on a socket.
+
+    Connecting can take as long as the connect timeout and reading blocks by
+    design, neither of which the GUI thread can afford to do.
+    """
+
+    received = Signal(str)
+    opened = Signal()
+    #: Emitted once, with the reason, or empty for a disconnect we asked for.
+    closed = Signal(str)
+
+    def __init__(self, console: RawConsole) -> None:
+        super().__init__()
+        self.console = console
+        self._stopping = False
+
+    def run(self) -> None:
+        try:
+            self.console.open()
+        except ConsoleError as e:
+            self.closed.emit(str(e))
+            return
+
+        self.opened.emit()
+        while True:
+            text = self.console.read()
+            if text is None:
+                break
+            if text:
+                self.received.emit(text)
+        self.closed.emit("" if self._stopping else "The far end closed the connection")
+
+    def stop(self) -> None:
+        """Ask the console to disconnect, unblocking the read in `run`."""
+        self._stopping = True
+        self.console.close()
+
+
 class FlashWindow(QMainWindow):
     """Main window: pick a device and a release, then flash it."""
 
@@ -204,6 +266,7 @@ class FlashWindow(QMainWindow):
             sources if sources is not None else default_sources()
         )
         self.worker: FlashWorker | None = None
+        self.console: ConsoleWorker | None = None
         self.source_error = ""
 
         self.setWindowTitle("D2 Programmer")
@@ -218,8 +281,20 @@ class FlashWindow(QMainWindow):
         outer.setSpacing(12)
 
         outer.addWidget(self._build_target_box())
-        outer.addWidget(self._build_firmware_box())
-        outer.addWidget(self._build_run_box())
+
+        # The two modes share one endpoint and cannot both hold it, so they
+        # are tabs rather than another box stacked on an already tall window.
+        flash_page = QWidget()
+        flash_layout = QVBoxLayout(flash_page)
+        flash_layout.setContentsMargins(0, 12, 0, 0)
+        flash_layout.setSpacing(12)
+        flash_layout.addWidget(self._build_firmware_box())
+        flash_layout.addWidget(self._build_run_box())
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(flash_page, "Flash")
+        self.tabs.addTab(self._build_console_box(), "Console")
+        outer.addWidget(self.tabs)
 
         if default and default in self.sources:
             self.cb_source.setCurrentText(default)
@@ -364,6 +439,70 @@ class FlashWindow(QMainWindow):
 
         return box
 
+    def _build_console_box(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 12, 0, 0)
+        layout.setSpacing(10)
+
+        warning = QLabel(
+            "⚠  The RS485 bus is shared: everything sent here reaches every "
+            "board on this port, and their replies come back interleaved. The "
+            "board address above does not apply."
+        )
+        warning.setObjectName("warn")
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+
+        self.console_view = QPlainTextEdit()
+        self.console_view.setReadOnly(True)
+        self.console_view.setFont(QFont("monospace", 10))
+        self.console_view.setMinimumHeight(260)
+        self.console_view.setPlaceholderText(
+            "Connect to open a raw TCP session on the flashing endpoint"
+        )
+        layout.addWidget(self.console_view, 1)
+
+        self.le_console = QLineEdit()
+        self.le_console.setFont(QFont("monospace", 10))
+        self.le_console.setPlaceholderText("Type a command and press Enter")
+        self.le_console.setEnabled(False)
+        self.btn_send = QPushButton("Send")
+        self.btn_send.setEnabled(False)
+
+        send_row = QHBoxLayout()
+        send_row.addWidget(self.le_console, 1)
+        send_row.addWidget(self.btn_send)
+        layout.addLayout(send_row)
+
+        self.btn_console = QPushButton("Connect")
+        self.cb_echo = QCheckBox("Local echo")
+        self.cb_echo.setChecked(True)
+        self.cb_echo.setToolTip(
+            "Show what you send. Half-duplex RS485 usually will not echo it back."
+        )
+        self.cb_ending = QComboBox()
+        for ending in LineEnding:
+            self.cb_ending.addItem(ending.label, ending)
+        # Set explicitly: without this the combo would show whichever member
+        # happens to be declared first, so reordering the enum would silently
+        # change what the console sends.
+        self.cb_ending.setCurrentText(LineEnding.CRLF.label)
+        self.cb_ending.setFixedWidth(90)
+        self.cb_ending.setToolTip("The D2AFE console terminates a line on CRLF")
+        self.lbl_console_status = QLabel("Not connected")
+        self.lbl_console_status.setObjectName("hint")
+
+        control_row = QHBoxLayout()
+        control_row.addWidget(self.btn_console)
+        control_row.addWidget(self.lbl_console_status, 1)
+        control_row.addWidget(self.cb_echo)
+        control_row.addWidget(QLabel("Line ending"))
+        control_row.addWidget(self.cb_ending)
+        layout.addLayout(control_row)
+
+        return page
+
     def _connect_signals(self) -> None:
         self.rb_afe.toggled.connect(self.refresh_releases)
         self.cb_source.currentIndexChanged.connect(self.refresh_releases)
@@ -371,6 +510,9 @@ class FlashWindow(QMainWindow):
         self.cb_address.currentIndexChanged.connect(self.update_preview)
         self.le_ip.textChanged.connect(self.update_preview)
         self.le_port.textChanged.connect(self.update_preview)
+        self.btn_console.clicked.connect(self.toggle_console)
+        self.btn_send.clicked.connect(self.send_to_console)
+        self.le_console.returnPressed.connect(self.send_to_console)
         self.cb_release.currentIndexChanged.connect(self.update_preview)
         self.cb_script.currentIndexChanged.connect(self.update_preview)
         self.le_binary.textChanged.connect(self.update_preview)
@@ -530,6 +672,14 @@ class FlashWindow(QMainWindow):
             QMessageBox.critical(self, "Cannot flash", str(e))
             return
 
+        if self.console is not None:
+            # One endpoint, one holder: the device server gives the serial
+            # port to whoever is connected, so the console has to let go.
+            self.console_view.appendPlainText(
+                "*** Disconnected so the flash can use the port"
+            )
+            self.disconnect_console()
+
         self.log.clear()
         self.lbl_status.setText("Running")
         self.lbl_phase.setText("")
@@ -542,6 +692,98 @@ class FlashWindow(QMainWindow):
         # Only release our reference once the thread has actually exited.
         self.worker.finished.connect(self.release_worker)
         self.worker.start()
+        self._update_console_controls()
+
+    # ---------------- Console ----------------
+
+    def toggle_console(self) -> None:
+        """Connect the console, or disconnect it if it is already up."""
+        if self.console is not None:
+            self.disconnect_console()
+            return
+
+        try:
+            ip, port = self.connection()
+        except ValueError as e:
+            QMessageBox.critical(self, "Cannot connect", str(e))
+            return
+
+        console = RawConsole(ip, int(port))
+        self.console_view.appendPlainText(f"*** Connecting to {console.endpoint}…")
+        self.console = ConsoleWorker(console)
+        self.console.received.connect(self.handle_console_output)
+        self.console.opened.connect(self.handle_console_opened)
+        self.console.closed.connect(self.handle_console_closed)
+        self.console.finished.connect(self.release_console)
+        self.console.start()
+        self._update_console_controls(connecting=True)
+
+    def disconnect_console(self) -> None:
+        """Drop the console session, if there is one."""
+        console = self.console
+        if console is None:
+            return
+        console.stop()
+        if not console.wait(5000):
+            console.terminate()
+            console.wait(1000)
+
+    def handle_console_opened(self) -> None:
+        self.console_view.appendPlainText("*** Connected")
+        self._update_console_controls()
+        self.le_console.setFocus()
+
+    def handle_console_output(self, text: str) -> None:
+        """Append received text, which arrives in chunks, not lines."""
+        cursor = self.console_view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(text)
+        self.console_view.setTextCursor(cursor)
+
+    def handle_console_closed(self, reason: str) -> None:
+        self.console_view.appendPlainText(f"*** {reason or 'Disconnected'}")
+
+    def release_console(self) -> None:
+        """Drop the finished worker, once it is safe to destroy it."""
+        console = self.console
+        self.console = None
+        if console is not None:
+            console.wait()
+            console.deleteLater()
+        self._update_console_controls()
+
+    def send_to_console(self) -> None:
+        console = self.console
+        if console is None:
+            return
+        text = self.le_console.text()
+        ending = self.cb_ending.currentData()
+        try:
+            console.console.send(text, ending)
+        except ConsoleError as e:
+            self.console_view.appendPlainText(f"*** {e}")
+            return
+        if self.cb_echo.isChecked():
+            self.console_view.appendPlainText(text)
+        self.le_console.clear()
+
+    def _update_console_controls(self, connecting: bool = False) -> None:
+        """Keep the console controls in step with the connection and the flash."""
+        flashing = self.worker is not None
+        connected = self.console is not None and not connecting
+        self.btn_console.setEnabled(not flashing)
+        self.btn_console.setText("Disconnect" if self.console else "Connect")
+        self.le_console.setEnabled(connected)
+        self.btn_send.setEnabled(connected)
+        if flashing:
+            status = "Held by the flash"
+        elif connecting:
+            status = "Connecting…"
+        elif connected:
+            status = "Connected"
+        else:
+            status = "Not connected"
+        self.lbl_console_status.setText(status)
 
     def handle_output(self, line: str) -> None:
         self.log.appendPlainText(line)
@@ -572,11 +814,13 @@ class FlashWindow(QMainWindow):
             worker.wait()
             worker.deleteLater()
         self.update_preview()
+        self._update_console_controls()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         """Don't let Qt tear down a running flash underneath us."""
         worker = self.worker
         if worker is None or not worker.isRunning():
+            self.disconnect_console()
             event.accept()
             return
 
@@ -596,11 +840,12 @@ class FlashWindow(QMainWindow):
         event.accept()
 
     def shutdown(self) -> None:
-        """Stop any running flash and wait for its thread to exit.
+        """Stop any running flash and console, and wait for their threads.
 
         Safe to call more than once. Qt aborts the process if a QThread is
         destroyed while still running, so this must happen before teardown.
         """
+        self.disconnect_console()
         worker = self.worker
         self.worker = None
         if worker is not None and worker.isRunning():
