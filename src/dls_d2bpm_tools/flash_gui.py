@@ -46,7 +46,13 @@ from .firmware import (
     format_command,
     latest_release,
 )
-from .sources import FIRMWARE_BASE, GitLabSource, LocalSource, SourceError
+from .sources import (
+    FIRMWARE_BASE,
+    GITLAB_REPOSITORY,
+    GitLabSource,
+    LocalSource,
+    SourceError,
+)
 
 __all__ = ["ConsoleWorker", "FlashWindow", "main"]
 
@@ -152,9 +158,14 @@ GITLAB_SOURCE = "GitLab releases"
 FILESYSTEM_SOURCE = "Filesystem"
 
 
-def default_sources(base: Path = FIRMWARE_BASE) -> dict[str, FirmwareSource]:
+def default_sources(
+    base: Path = FIRMWARE_BASE, firmware_repo: str = GITLAB_REPOSITORY
+) -> dict[str, FirmwareSource]:
     """The sources offered in the GUI, in the order they are listed."""
-    return {GITLAB_SOURCE: GitLabSource(), FILESYSTEM_SOURCE: LocalSource(base)}
+    return {
+        GITLAB_SOURCE: GitLabSource.from_repository(firmware_repo),
+        FILESYSTEM_SOURCE: LocalSource(base),
+    }
 
 
 def _list_releases(
@@ -390,6 +401,30 @@ class FlashWindow(QMainWindow):
         source_row.addWidget(self.lbl_source, 1)
         form.addRow("Source", source_row)
 
+        gitlab = self.sources.get(GITLAB_SOURCE)
+        repository = (
+            f"{gitlab.url}/{gitlab.project}"
+            if isinstance(gitlab, GitLabSource)
+            else GITLAB_REPOSITORY
+        )
+        self.le_repository = QLineEdit(repository)
+        self.le_repository.setToolTip(
+            "GitLab project URL. Press Apply or Enter to load its releases."
+        )
+        self.btn_repository = QPushButton("Apply")
+        self.btn_repository.clicked.connect(self.apply_repository)
+        self.le_repository.returnPressed.connect(self.apply_repository)
+        self.lbl_repository = QLabel()
+        self.lbl_repository.setWordWrap(True)
+        self.le_repository.textEdited.connect(
+            lambda: self.lbl_repository.setText("Press Apply to use this repository.")
+        )
+        repository_row = QHBoxLayout()
+        repository_row.addWidget(self.le_repository, 1)
+        repository_row.addWidget(self.btn_repository)
+        form.addRow("Repository URL", repository_row)
+        form.addRow("", self.lbl_repository)
+
         self.cb_release = QComboBox()
         self.cb_script = QComboBox()
         form.addRow("Firmware release", self.cb_release)
@@ -557,6 +592,23 @@ class FlashWindow(QMainWindow):
     def reload_releases(self) -> None:
         """Re-read the source from scratch, discarding anything it cached."""
         self.refresh_releases(refresh_cache=True)
+
+    def apply_repository(self) -> None:
+        """Validate an edited URL before replacing the current GitLab source."""
+        try:
+            source = GitLabSource.from_repository(self.le_repository.text())
+        except ValueError as e:
+            self.lbl_repository.setText(f"⚠  {e}")
+            return
+        self.sources[GITLAB_SOURCE] = source
+        self.le_repository.setText(f"{source.url}/{source.project}")
+        self.lbl_repository.clear()
+        self.cb_source.blockSignals(True)
+        if self.cb_source.findText(GITLAB_SOURCE) < 0:
+            self.cb_source.addItem(GITLAB_SOURCE)
+        self.cb_source.setCurrentText(GITLAB_SOURCE)
+        self.cb_source.blockSignals(False)
+        self.refresh_releases()
 
     def refresh_releases(
         self, *, refresh_cache: bool = False, notice: str = ""
@@ -930,6 +982,12 @@ def main(args: Sequence[str] | None = None) -> int:
         help="where to read firmware releases from (default: gitlab)",
     )
     parser.add_argument(
+        "--firmware-repo",
+        default=GITLAB_REPOSITORY,
+        metavar="URL",
+        help=f"GitLab project providing firmware (default: {GITLAB_REPOSITORY})",
+    )
+    parser.add_argument(
         "--firmware-base",
         type=Path,
         default=FIRMWARE_BASE,
@@ -937,10 +995,14 @@ def main(args: Sequence[str] | None = None) -> int:
     )
     argv = list(args) if args is not None else sys.argv[1:]
     parsed, qt_args = parser.parse_known_args(argv)
+    try:
+        sources = default_sources(parsed.firmware_base, parsed.firmware_repo)
+    except ValueError as e:
+        parser.error(f"--firmware-repo: {e}")
 
     app = QApplication([sys.argv[0] if sys.argv else "", *qt_args])
     window = FlashWindow(
-        default_sources(parsed.firmware_base),
+        sources,
         default=GITLAB_SOURCE if parsed.source == "gitlab" else FILESYSTEM_SOURCE,
     )
     # quit() can be reached without ever passing through closeEvent.

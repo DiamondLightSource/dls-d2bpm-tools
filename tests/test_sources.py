@@ -220,6 +220,66 @@ def test_download_is_cached(gitlab: FakeGitLab) -> None:
     assert len(gitlab.requests) == before, "should not re-download"
 
 
+@pytest.mark.parametrize("different_host", [False, True])
+def test_repositories_do_not_share_cached_firmware(
+    tmp_path: Path, different_host: bool
+) -> None:
+    first = FakeGitLab(cache_dir=tmp_path)
+    first.artifact_body = b"original firmware"
+    original_path = first.artifact("0.9.3b", Device.D2AFE, ".bin").obtain()
+
+    other = FakeGitLab(cache_dir=tmp_path)
+    # Reconfigure the same fake transport with a different repository identity.
+    GitLabSource.__init__(
+        other,
+        url="https://other.example" if different_host else first.url,
+        project=first.project if different_host else "other/firmware",
+        cache_dir=tmp_path,
+    )
+    other.artifact_body = b"fork firmware"
+    other_path = other.artifact("0.9.3b", Device.D2AFE, ".bin").obtain()
+    assert original_path != other_path
+    assert original_path.read_bytes() == b"original firmware"
+    assert other_path.read_bytes() == b"fork firmware"
+
+
+@pytest.mark.parametrize("suffix", ["", "/", ".git", "/-/releases", "/-/releases/"])
+def test_repository_url_configures_host_and_nested_project(suffix: str) -> None:
+    source = GitLabSource.from_repository(
+        f"https://gitlab.example:8443/team/subgroup/firmware{suffix}"
+    )
+    assert source.url == "https://gitlab.example:8443"
+    assert source.project == "team/subgroup/firmware"
+    assert source.api == (
+        "https://gitlab.example:8443/api/v4/projects/team%2Fsubgroup%2Ffirmware"
+    )
+    assert "team/subgroup/firmware/-/releases" in source.description
+    canonical = GitLabSource.from_repository(
+        "https://gitlab.example:8443/team/subgroup/firmware"
+    )
+    assert source.cache_dir == canonical.cache_dir
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "gitlab.example/team/firmware",
+        "git@gitlab.example:team/firmware.git",
+        "https://gitlab.example",
+        "https://gitlab.example/project",
+        "https://user:password@gitlab.example/team/firmware",
+        "https://gitlab.example/team/firmware?token=secret",
+        "https://gitlab.example/team/firmware#readme",
+        "https://gitlab.example/team/../firmware",
+        "https://gitlab.example:wrong/team/firmware",
+        "https://gitlab.example:0/team/firmware",
+    ],
+)
+def test_invalid_repository_url_is_rejected(repository: str) -> None:
+    with pytest.raises(ValueError):
+        GitLabSource.from_repository(repository)
+
+
 def test_download_reports_progress(gitlab: FakeGitLab) -> None:
     lines: list[str] = []
     gitlab.artifact("0.9.3b", Device.D2AFE, ".bin").obtain(lines.append)

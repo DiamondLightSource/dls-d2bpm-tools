@@ -13,9 +13,10 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from .firmware import SCRIPT_DEVICE, TARGET, Artifact, Device, LogFn
 
@@ -23,6 +24,7 @@ __all__ = [
     "DEFAULT_CACHE_DIR",
     "FIRMWARE_BASE",
     "GITLAB_PROJECT",
+    "GITLAB_REPOSITORY",
     "GITLAB_URL",
     "MAX_RELEASE_PAGES",
     "RELEASES_PER_PAGE",
@@ -37,6 +39,7 @@ FIRMWARE_BASE = Path("/dls_sw/work/ci-builds/d2afe-firmware")
 #: The GitLab instance and project publishing firmware releases.
 GITLAB_URL = "https://gitlab.diamond.ac.uk"
 GITLAB_PROJECT = "diagnostics/d2afe-firmware"
+GITLAB_REPOSITORY = f"{GITLAB_URL}/{GITLAB_PROJECT}"
 
 #: Downloaded artifacts are kept here so a re-flash costs nothing.
 DEFAULT_CACHE_DIR = (
@@ -205,9 +208,41 @@ class GitLabSource:
         self.url = url.rstrip("/")
         self.project = project
         self.token = token or os.environ.get("GITLAB_TOKEN")
-        self.cache_dir = cache_dir
+        # Tags and filenames can be identical in different repositories.
+        repository_id = sha256(f"{self.url}/{self.project}".encode()).hexdigest()[:16]
+        self.cache_dir = cache_dir / repository_id
         self.timeout = timeout
         self._releases: list[_Release] | None = None
+
+    @classmethod
+    def from_repository(cls, repository: str) -> GitLabSource:
+        """Configure a source from an HTTP(S) GitLab project URL.
+
+        Nested namespaces and URLs copied from the releases page are accepted.
+        Credentials belong in GITLAB_TOKEN rather than in the URL.
+        """
+        parsed = urlsplit(repository.strip())
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "Use an HTTP(S) GitLab project URL without credentials, "
+                "query parameters or a fragment"
+            )
+        # Accessing port validates malformed port numbers before any HTTP work.
+        if parsed.port == 0:
+            raise ValueError("The GitLab URL port must be between 1 and 65535")
+        project = unquote(parsed.path).strip("/")
+        project = project.removesuffix("/-/releases").removesuffix(".git")
+        parts = project.split("/")
+        if len(parts) < 2 or any(p in ("", ".", "..", "-") for p in parts):
+            raise ValueError("The GitLab URL must include a namespace and project")
+        return cls(url=f"{parsed.scheme}://{parsed.netloc}", project=project)
 
     @property
     def description(self) -> str:

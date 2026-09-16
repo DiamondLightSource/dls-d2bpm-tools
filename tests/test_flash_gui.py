@@ -27,8 +27,9 @@ from dls_d2bpm_tools.flash_gui import (  # noqa: E402
     FILESYSTEM_SOURCE,
     GITLAB_SOURCE,
     FlashWindow,
+    default_sources,
 )
-from dls_d2bpm_tools.sources import LocalSource  # noqa: E402
+from dls_d2bpm_tools.sources import GitLabSource, LocalSource  # noqa: E402
 
 from .conftest import make_release  # noqa: E402
 from .test_console import FakeServer  # noqa: E402
@@ -253,6 +254,86 @@ def test_defaults_to_gitlab(
     assert win.cb_source.currentText() == GITLAB_SOURCE
     assert win.cb_release.currentText() == "0.9.3b"
     assert "gitlab.example" in win.lbl_source.text()
+
+
+def test_custom_repository_preserves_filesystem_fallback(tmp_path: Path) -> None:
+    sources = default_sources(tmp_path, "https://other.example/group/firmware")
+    assert sources[GITLAB_SOURCE].description == (
+        "GitLab: https://other.example/group/firmware/-/releases"
+    )
+    local = sources[FILESYSTEM_SOURCE]
+    assert isinstance(local, LocalSource)
+    assert local.base == tmp_path
+
+
+def test_repository_field_starts_with_configured_url(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    win = FlashWindow(
+        default_sources(tmp_path, "https://other.example/group/firmware"),
+        default=FILESYSTEM_SOURCE,
+    )
+    assert win.le_repository.text() == "https://other.example/group/firmware"
+
+
+@pytest.mark.parametrize("press_enter", [False, True])
+def test_applying_repository_selects_and_loads_new_source(
+    qapp: QApplication,
+    base: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    press_enter: bool,
+) -> None:
+    requests: list[str] = []
+
+    def list_releases(source: GitLabSource, device: Device) -> list[str]:
+        requests.append(source.api)
+        return []
+
+    monkeypatch.setattr(GitLabSource, "list_releases", list_releases)
+    win = local_window(base)
+    win.le_repository.setText("https://other.example/team/firmware.git")
+    assert win.cb_source.currentText() == FILESYSTEM_SOURCE
+    assert not requests
+    if press_enter:
+        win.le_repository.returnPressed.emit()
+    else:
+        win.btn_repository.click()
+    wait_for_releases(win)
+    assert requests == ["https://other.example/api/v4/projects/team%2Ffirmware"]
+    assert win.cb_source.currentText() == GITLAB_SOURCE
+    assert win.le_repository.text() == "https://other.example/team/firmware"
+    assert "other.example/team/firmware" in win.lbl_source.text()
+
+
+def test_invalid_repository_field_preserves_current_source(
+    qapp: QApplication, base: Path
+) -> None:
+    win = local_window(base)
+    source = win.source
+    release = win.cb_release.currentText()
+    win.le_repository.setText("not-a-url")
+    win.btn_repository.click()
+    assert "HTTP(S) GitLab project URL" in win.lbl_repository.text()
+    assert win.source is source
+    assert win.cb_release.currentText() == release
+    assert win.btn_run.isEnabled()
+
+
+def test_gui_repository_override_falls_back_when_unreachable(
+    qapp: QApplication, base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(source: GitLabSource, device: Device) -> list[str]:
+        raise OSError("repository unreachable")
+
+    monkeypatch.setattr(GitLabSource, "list_releases", fail)
+    win = local_window(base)
+    win.le_repository.setText("https://other.example/team/firmware")
+    win.btn_repository.click()
+    wait_for_releases(win)
+    assert win.cb_source.currentText() == FILESYSTEM_SOURCE
+    assert win.cb_release.currentText() == "1.0.0"
+    assert "repository unreachable" in win.lbl_source.text()
+    assert win.le_repository.text() == "https://other.example/team/firmware"
 
 
 def test_switching_source_relists_releases(

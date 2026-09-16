@@ -59,6 +59,11 @@ def test_gui_flags_reach_the_gui(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [["--source", "filesystem"]]
 
     seen.clear()
+    repository = "https://gitlab.example/team/firmware"
+    assert main(["d2afe-flash", "--firmware-repo", repository]) == 0
+    assert seen == [["--firmware-repo", repository]]
+
+    seen.clear()
     assert main(["d2afe-flash"]) == 0
     assert seen == [[]]
 
@@ -69,6 +74,14 @@ def test_gui_help_is_the_gui_s_own() -> None:
     assert result.returncode == 0
     assert "--source" in result.stdout
     assert "--firmware-base" in result.stdout
+    assert "--firmware-repo" in result.stdout
+
+
+@requires_qt
+def test_invalid_repository_url_exits_before_starting_gui() -> None:
+    result = run(["d2afe-flash", "--firmware-repo", "not-a-url"])
+    assert result.returncode == 2
+    assert "--firmware-repo:" in result.stderr
 
 
 def test_unknown_flag_without_a_subcommand_still_errors() -> None:

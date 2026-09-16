@@ -66,9 +66,29 @@ Two sources, switchable in the GUI:
 **GitLab releases** (default) reads
 <https://gitlab.diamond.ac.uk/diagnostics/d2afe-firmware/-/releases> over the
 API and downloads the assets it needs, caching them under
-`~/.cache/dls-d2bpm-tools/firmware/<tag>/`. No token is needed on the DLS
+`~/.cache/dls-d2bpm-tools/firmware/<repository-id>/<tag>/`. No token is needed on the DLS
 network; set `GITLAB_TOKEN` if that ever changes. Use this from anywhere,
 including machines with no `/dls_sw` mount.
+
+To use another GitLab project or server, override the full project URL:
+
+```sh
+uvx dls-d2bpm-tools d2afe-flash \
+    --firmware-repo https://gitlab.example.org/team/d2afe-firmware
+```
+
+You can also edit **Repository URL** in the GUI and press **Apply** or Enter.
+The field starts with the command-line URL (or the default). Applying it selects
+the GitLab source and loads releases in the background, with the same filesystem
+fallback on failure. Invalid URLs are reported beside the field without replacing
+the current source. Changes apply to this session only.
+
+Nested namespaces, a trailing `.git`, and links ending in `/-/releases` are
+accepted. The project must publish the same release asset layout as the default
+firmware repository. Authentication still uses `GITLAB_TOKEN`, and filesystem
+fallback still uses `--firmware-base`. Each repository has its own cache so
+identically named releases cannot reuse another repository's firmware. Older
+downloads in the previous cache layout will be downloaded again once.
 
 **Filesystem** reads the CI build area at
 `/dls_sw/work/ci-builds/d2afe-firmware`, the original behaviour. Pick the
