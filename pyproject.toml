@@ -15,7 +15,7 @@ classifiers = [
 description = "Tools to facilitate development and maintenance of D2 BPM software"
 dependencies = [
     # 6.10+ ships only manylinux_2_34 wheels; DLS RHEL 8 workstations are glibc 2.28.
-    "pyside6>=6.8,<6.10",
+    "pyside6>=6.11,<6.12",
     # uv-managed interpreters find no CA bundle on RHEL 8; see trust.py.
     "truststore>=0.10",
 ] # Add project dependencies here, e.g. ["click", "numpy"]
