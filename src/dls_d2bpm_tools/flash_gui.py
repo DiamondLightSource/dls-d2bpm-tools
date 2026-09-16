@@ -308,7 +308,7 @@ class FlashWindow(QMainWindow):
 
         self.setWindowTitle("D2 Programmer")
         self.setMinimumWidth(720)
-        self.resize(780, 860)
+        self.resize(780, 1000)
         self.setStyleSheet(STYLESHEET)
 
         central = QWidget()
