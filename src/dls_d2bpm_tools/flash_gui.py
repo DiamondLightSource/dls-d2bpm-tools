@@ -35,7 +35,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .console import ConsoleError, LineEnding, RawConsole
+from .console import (
+    ConsoleError,
+    LineEnding,
+    RawConsole,
+    TextDecoder,
+    format_hex,
+    parse_hex,
+)
 from .firmware import (
     PROGRESS_RE,
     Artifact,
@@ -150,7 +157,32 @@ QTabBar::tab:selected {
     color: #dfe3ea;
     font-weight: 600;
 }
-QRadioButton, QCheckBox { padding: 2px; }
+QRadioButton, QCheckBox {
+    padding: 2px;
+    spacing: 8px;
+    color: #dfe3ea;
+}
+QRadioButton:disabled, QCheckBox:disabled { color: #7b8496; }
+/* Qt draws these nearly black on a dark background unless told otherwise. */
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    background: #272b34;
+    border: 1px solid #5a6478;
+}
+QCheckBox::indicator { border-radius: 4px; }
+QRadioButton::indicator { border-radius: 9px; }
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: #3d7eff;
+}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+    background: #3d7eff;
+    border-color: #6a9cff;
+}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    background: #22262e;
+    border-color: #3a4150;
+}
 """
 
 
@@ -252,7 +284,7 @@ class ConsoleWorker(QThread):
     design, neither of which the GUI thread can afford to do.
     """
 
-    received = Signal(str)
+    received = Signal(bytes)
     opened = Signal()
     #: Emitted once, with the reason, or empty for a disconnect we asked for.
     closed = Signal(str)
@@ -271,11 +303,11 @@ class ConsoleWorker(QThread):
 
         self.opened.emit()
         while True:
-            text = self.console.read()
-            if text is None:
+            data = self.console.read()
+            if data is None:
                 break
-            if text:
-                self.received.emit(text)
+            if data:
+                self.received.emit(data)
         self.console.close()
         self.closed.emit("" if self._stopping else "The far end closed the connection")
 
@@ -299,6 +331,8 @@ class FlashWindow(QMainWindow):
         )
         self.worker: FlashWorker | None = None
         self.console: ConsoleWorker | None = None
+        #: Carries a character split across two reads, for the text view.
+        self.decoder = TextDecoder()
         self.source_error = ""
         self._release_results: Queue[tuple[FirmwareSource, list[str], str]] = Queue()
         self._source_notice = ""
@@ -526,13 +560,18 @@ class FlashWindow(QMainWindow):
 
         self.le_console = QLineEdit()
         self.le_console.setFont(QFont("monospace", 10))
-        self.le_console.setPlaceholderText("Type a command and press Enter")
         self.le_console.setEnabled(False)
+        self.cb_hex_send = QCheckBox("Send hex")
+        self.cb_hex_send.setToolTip(
+            "Read what you type as hex bytes and send them exactly, with no "
+            "line ending appended"
+        )
         self.btn_send = QPushButton("Send")
         self.btn_send.setEnabled(False)
 
         send_row = QHBoxLayout()
         send_row.addWidget(self.le_console, 1)
+        send_row.addWidget(self.cb_hex_send)
         send_row.addWidget(self.btn_send)
         layout.addLayout(send_row)
 
@@ -541,6 +580,10 @@ class FlashWindow(QMainWindow):
         self.cb_echo.setChecked(True)
         self.cb_echo.setToolTip(
             "Show what you send. Half-duplex RS485 usually will not echo it back."
+        )
+        self.cb_hex_view = QCheckBox("Hex view")
+        self.cb_hex_view.setToolTip(
+            "Show what arrives as hex bytes, so terminators and padding are visible"
         )
         self.cb_ending = QComboBox()
         for ending in LineEnding:
@@ -558,6 +601,7 @@ class FlashWindow(QMainWindow):
         control_row.addWidget(self.btn_console)
         control_row.addWidget(self.lbl_console_status, 1)
         control_row.addWidget(self.cb_echo)
+        control_row.addWidget(self.cb_hex_view)
         control_row.addWidget(QLabel("Line ending"))
         control_row.addWidget(self.cb_ending)
         layout.addLayout(control_row)
@@ -574,6 +618,8 @@ class FlashWindow(QMainWindow):
         self.btn_console.clicked.connect(self.toggle_console)
         self.btn_send.clicked.connect(self.send_to_console)
         self.le_console.returnPressed.connect(self.send_to_console)
+        self.cb_hex_view.toggled.connect(self.change_view_mode)
+        self.cb_hex_send.toggled.connect(self.change_send_mode)
         self.cb_release.currentIndexChanged.connect(self.update_preview)
         self.cb_script.currentIndexChanged.connect(self.update_preview)
         self.le_binary.textChanged.connect(self.update_preview)
@@ -850,12 +896,35 @@ class FlashWindow(QMainWindow):
         self._update_console_controls()
         self.le_console.setFocus()
 
-    def handle_console_output(self, text: str) -> None:
-        """Append received text, which arrives in chunks, not lines."""
+    def handle_console_output(self, data: bytes) -> None:
+        """Append what arrived, which comes in chunks, not lines."""
+        if self.cb_hex_view.isChecked():
+            # Trailing space so the next chunk does not butt up against this
+            # one and read as a single byte.
+            self._append(format_hex(data) + " ")
+        else:
+            self._append(self.decoder.decode(data))
+
+    def _append(self, text: str) -> None:
+        """Add `text` to the console view without a newline of its own."""
+        if not text:
+            return
         cursor = self.console_view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(text)
         self.console_view.setTextCursor(cursor)
+
+    def change_view_mode(self, hex_view: bool) -> None:
+        """Switch between showing what arrives as text and as hex."""
+        # Any half-finished character belongs to the mode that was showing it.
+        self.decoder.reset()
+        self.console_view.appendPlainText(f"*** {'Hex' if hex_view else 'Text'} view")
+
+    def change_send_mode(self, hex_send: bool) -> None:
+        """Switch between sending what is typed as text and as raw hex."""
+        # Raw bytes are sent exactly as given, so a line ending would be wrong.
+        self.cb_ending.setEnabled(not hex_send)
+        self._update_console_controls()
 
     def handle_console_closed(self, reason: str) -> None:
         self.console_view.appendPlainText(f"*** {reason or 'Disconnected'}")
@@ -874,14 +943,30 @@ class FlashWindow(QMainWindow):
         if console is None:
             return
         text = self.le_console.text()
-        ending = self.cb_ending.currentData()
+
+        if self.cb_hex_send.isChecked():
+            try:
+                data = parse_hex(text)
+            except ValueError as e:
+                # Leave the input alone so the typo can be corrected.
+                self.console_view.appendPlainText(f"*** {e}")
+                return
+            echo = format_hex(data)
+        else:
+            data = None
+            echo = text
+
         try:
-            console.console.send(text, ending)
+            if data is None:
+                console.console.send_text(text, self.cb_ending.currentData())
+            else:
+                console.console.send_bytes(data)
         except ConsoleError as e:
             self.console_view.appendPlainText(f"*** {e}")
             return
+
         if self.cb_echo.isChecked():
-            self.console_view.appendPlainText(text)
+            self.console_view.appendPlainText(echo)
         self.le_console.clear()
 
     def _update_console_controls(self, connecting: bool = False) -> None:
@@ -892,6 +977,11 @@ class FlashWindow(QMainWindow):
         self.btn_console.setText("Disconnect" if self.console else "Connect")
         self.le_console.setEnabled(connected)
         self.btn_send.setEnabled(connected)
+        self.le_console.setPlaceholderText(
+            "Type hex bytes, for example 0D 0A, and press Enter"
+            if self.cb_hex_send.isChecked()
+            else "Type a command and press Enter"
+        )
         if flashing:
             status = "Held by the flash"
         elif connecting:

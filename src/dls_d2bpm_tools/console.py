@@ -18,6 +18,7 @@ used for flashing means nothing here.
 from __future__ import annotations
 
 import codecs
+import re
 import socket
 import threading
 from enum import Enum
@@ -28,6 +29,9 @@ __all__ = [
     "ConsoleError",
     "LineEnding",
     "RawConsole",
+    "TextDecoder",
+    "format_hex",
+    "parse_hex",
 ]
 
 #: How long to wait for the device server to accept a connection.
@@ -39,6 +43,9 @@ READ_TIMEOUT = 0.2
 
 #: Enough for a burst of output without splitting it into needless updates.
 _CHUNK = 4096
+
+#: Separators and prefixes people write hex with, all of which are ignored.
+_HEX_NOISE_RE = re.compile(r"0x|\\x|[\s,;:_-]")
 
 
 class ConsoleError(RuntimeError):
@@ -60,6 +67,57 @@ class LineEnding(Enum):
     def label(self) -> str:
         """The name to show in the UI."""
         return self.name
+
+
+def format_hex(data: bytes) -> str:
+    """Render `data` as space separated uppercase hex, e.g. ``41 42 0D 0A``.
+
+    A flat stream rather than an offset-and-ASCII hexdump: bytes arrive in
+    whatever chunks the network hands over, so there are no meaningful lines
+    to number.
+    """
+    return " ".join(f"{byte:02X}" for byte in data)
+
+
+def parse_hex(text: str) -> bytes:
+    """The bytes written as hex in `text`, or raise `ValueError`.
+
+    Liberal about how they are written, since people copy hex out of all
+    sorts of places: ``0d0a``, ``0D 0A``, ``0x0d,0x0a`` and ``\\x0d\\x0a``
+    all mean the same two bytes.
+    """
+    cleaned = _HEX_NOISE_RE.sub("", text)
+    if not cleaned:
+        raise ValueError("Enter some hex bytes, for example 0D 0A")
+    stray = sorted(set(cleaned) - set("0123456789abcdefABCDEF"))
+    if stray:
+        strays = " ".join(stray)
+        is_are = "is" if len(stray) == 1 else "are"
+        raise ValueError(f"{strays} {is_are} not hex")
+    if len(cleaned) % 2:
+        raise ValueError(f"{len(cleaned)} hex digits is not a whole number of bytes")
+    return bytes.fromhex(cleaned)
+
+
+class TextDecoder:
+    """Decodes a byte stream to text, one arbitrary chunk at a time.
+
+    Bytes can arrive split mid-character, so this has to carry state from one
+    chunk to the next rather than decode each alone. Undecodable bytes become
+    replacement characters: line noise on an RS485 bus must not take the
+    console down with it.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Forget any half-finished character."""
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def decode(self, data: bytes) -> str:
+        """The text `data` completes, which may be none of it."""
+        return self._decoder.decode(data)
 
 
 class RawConsole:
@@ -85,9 +143,6 @@ class RawConsole:
         self.read_timeout = read_timeout
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
-        # Bytes can arrive split mid-character, so decoding has to carry state
-        # from one read to the next rather than decode each chunk alone.
-        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
     @property
     def endpoint(self) -> str:
@@ -117,10 +172,13 @@ class RawConsole:
         with self._lock:
             self._sock = sock
 
-    def read(self) -> str | None:
-        """Text received since the last call.
+    def read(self) -> bytes | None:
+        """Bytes received since the last call.
 
-        Returns ``""`` if nothing arrived before the read timeout, and `None`
+        Raw bytes rather than text, because the caller may want to show them
+        as hex — where a termination character is the whole point of looking.
+
+        Returns ``b""`` if nothing arrived before the read timeout, and `None`
         once the far end has closed the connection or the console has been
         closed from another thread.
         """
@@ -131,23 +189,31 @@ class RawConsole:
         try:
             chunk = sock.recv(_CHUNK)
         except TimeoutError:
-            return ""
+            return b""
         except OSError:
             # A close from another thread races us here; report it as an
             # ordinary end of stream rather than an error.
             return None
         if not chunk:
             return None
-        return self._decoder.decode(chunk)
+        return chunk
 
-    def send(self, text: str, ending: LineEnding = LineEnding.CRLF) -> None:
+    def send_text(self, text: str, ending: LineEnding = LineEnding.CRLF) -> None:
         """Send `text`, terminated by `ending`."""
+        self.send_bytes((text + ending.value).encode())
+
+    def send_bytes(self, data: bytes) -> None:
+        """Send `data` exactly as given, with nothing appended.
+
+        Nothing is appended deliberately: someone sending raw bytes is usually
+        doing it to control the terminator themselves.
+        """
         with self._lock:
             sock = self._sock
         if sock is None:
             raise ConsoleError("The console is not connected")
         try:
-            sock.sendall((text + ending.value).encode())
+            sock.sendall(data)
         except OSError as e:
             raise ConsoleError(f"Could not send to {self.endpoint}: {e}") from e
 

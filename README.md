@@ -159,7 +159,19 @@ Two consequences of the bus being shared, both surfaced in the tab:
   first and says so, and the Connect button is disabled while a flash runs.
 
 Lines are terminated with CRLF by default, since that is what the D2AFE console
-expects; CR and LF are selectable. Local echo is on by default,
+expects; CR and LF are selectable.
+
+**Hex view** shows what arrives as bytes — `4F 4B 0D 0A` rather than `OK` — so
+terminators, padding and anything unprintable are visible. It applies to what
+arrives next, not what is already on screen, and the switch is marked in the
+log so a hex dump is not mistaken for the board talking nonsense.
+
+**Send hex** reads what you type as hex bytes and sends them exactly: `02 41 03`
+sends three bytes and appends *nothing*, so the line ending selector is
+disabled while it is on — if you want a terminator, type it (`0D 0A`). Hex can
+be written however you have it to hand: `0d0a`, `0D 0A`, `0x0d,0x0a` and
+`\x0d\x0a` all mean the same two bytes. Anything that isn't hex is reported in
+the log and left in the input to correct. Local echo is on by default,
 because half-duplex RS485 will not echo your keystrokes back to you.
 
 ## Development

@@ -739,3 +739,85 @@ def test_shutdown_closes_the_console(
 
     assert _pump(qapp, lambda: win.console is None)
     assert not any("still running" in m for m in qt_messages), qt_messages
+
+
+def test_console_hex_view_shows_the_bytes(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    """The point of the hex view: seeing the terminator the board sends."""
+    win = connected_window(qapp, base, server)
+    win.cb_hex_view.setChecked(True)
+    server.send(b"OK\r\n")
+
+    assert _pump(qapp, lambda: "4F 4B 0D 0A" in win.console_view.toPlainText())
+
+
+def test_console_text_view_is_the_default(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    win = connected_window(qapp, base, server)
+    assert not win.cb_hex_view.isChecked()
+    server.send(b"OK\r\n")
+
+    assert _pump(qapp, lambda: "OK" in win.console_view.toPlainText())
+    assert "4F 4B" not in win.console_view.toPlainText()
+
+
+def test_console_says_which_view_it_switched_to(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    """Otherwise a hex dump looks like the board started talking nonsense."""
+    win = connected_window(qapp, base, server)
+    win.cb_hex_view.setChecked(True)
+    assert "*** Hex view" in win.console_view.toPlainText()
+    win.cb_hex_view.setChecked(False)
+    assert "*** Text view" in win.console_view.toPlainText()
+
+
+def test_console_sends_raw_hex_with_nothing_appended(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    win = connected_window(qapp, base, server)
+    win.cb_hex_send.setChecked(True)
+    win.le_console.setText("02 41 03")
+    win.send_to_console()
+
+    assert _pump(qapp, lambda: bytes(server.received) == b"\x02\x41\x03")
+    assert win.le_console.text() == ""
+
+
+def test_console_echoes_hex_as_hex(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    win = connected_window(qapp, base, server)
+    win.cb_hex_send.setChecked(True)
+    win.le_console.setText("0d0a")
+    win.send_to_console()
+
+    assert _pump(qapp, lambda: bytes(server.received) == b"\r\n")
+    assert "0D 0A" in win.console_view.toPlainText()
+
+
+def test_console_keeps_bad_hex_so_it_can_be_corrected(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    win = connected_window(qapp, base, server)
+    win.cb_hex_send.setChecked(True)
+    win.le_console.setText("0g")
+    win.send_to_console()
+
+    assert "g is not hex" in win.console_view.toPlainText()
+    assert win.le_console.text() == "0g", "the typo should still be there to fix"
+    assert bytes(server.received) == b"", "nothing should have been sent"
+
+
+def test_console_hex_send_disables_the_line_ending(
+    qapp: QApplication, base: Path, server: FakeServer
+) -> None:
+    """Raw bytes go exactly as typed, so the ending would be a lie."""
+    win = connected_window(qapp, base, server)
+    assert win.cb_ending.isEnabled()
+    win.cb_hex_send.setChecked(True)
+    assert not win.cb_ending.isEnabled()
+    win.cb_hex_send.setChecked(False)
+    assert win.cb_ending.isEnabled()
